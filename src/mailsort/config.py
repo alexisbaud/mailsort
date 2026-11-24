@@ -32,6 +32,8 @@ REPLY_LABEL_ID = "to_reply"
 """Label retiré dès que le dernier message du fil vient de l'utilisateur (règle 6)."""
 TYPE_QUESTION = "@types"
 """Clé de l'empreinte partagée par tous les types (un `id` de label ne peut pas contenir `@`)."""
+SECONDARY_TYPE_QUESTION = "@types:secondary"
+"""Second passage des types ; il dépend de la réponse au choix de type et partage son empreinte."""
 
 Probability = Annotated[float, Field(ge=0, le=1)]
 
