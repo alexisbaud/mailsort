@@ -1,0 +1,36 @@
+[project]
+name = "mailsort"
+version = "0.1.0"
+description = "Tri automatique des e-mails Gmail par Jev"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.29.2",
+]
+
+[project.scripts]
+mailsort = "mailsort.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mailsort"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.6",
+]

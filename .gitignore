@@ -1,0 +1,27 @@
+# Secrets — jamais dans le dépôt
+.env
+token.json
+credentials.json
+client_secret*.json
+
+# Données locales
+*.db
+*.db-journal
+*.csv
+logs/
+*.log
+*.lock
+!uv.lock
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Système
+.DS_Store
