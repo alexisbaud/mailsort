@@ -256,7 +256,7 @@ Trier 1 000 mails coûte environ 0,10 à 0,13 $ (au pire 0,30 $ avec beaucoup de
 
 Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis remplace les filtres actuels.
 
-1. **Test à blanc.** `mailsort run --dry-run` classe les mails et écrit un CSV (mail, probabilités, labels qui seraient posés) sans rien modifier.
+1. **Test à blanc.** `mailsort run --dry-run` lit les vrais mails, interroge Jev et applique les règles, sans rien modifier dans Gmail : aucun label n'est créé, posé ou retiré. Il affiche le nombre de mails par label, le nombre de mails sans aucun label, ceux dont le seul label serait 🤔 To Review, et le total trié. Il écrit aussi un CSV (mail, probabilités, labels qui seraient posés, raisons de 🤔 To Review). Par défaut il traite les 200 mails les plus récents ; `--limit N`, `--all` et `--query` changent le périmètre. Au-delà de 500 mails à envoyer à Jev, il affiche le coût estimé et demande confirmation. Les réponses de Jev sont enregistrées dans la base (pas les décisions) : relancer le test après un changement de seuil ne coûte rien, et seules les questions modifiées sont reposées. Si aucun jeton Gmail n'existe encore, il ouvre le navigateur pour l'autorisation.
 2. **Mesure de qualité.** `mailsort eval` compare le résultat aux labels actuels « 💳 Paiements » (≈ 90 fils) et « 📦 Réceptions » (≈ 45 fils), classés à la main et par filtres. Il affiche les mails où Jev n'est pas d'accord, pour ajuster descriptions et seuils.
 3. **Reprise des labels existants.** Le programme renomme « 💳 Paiements » en « Types/💳 Payments » et « 📦 Réceptions » en « Types/📦 Deliveries », en gardant leurs mails. Ces labels existants ne comptent pas comme des corrections manuelles.
 4. **Premier passage réel.** Il classe toute la boîte, puis produit un rapport des labels ajoutés et retirés.
@@ -266,7 +266,7 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | --- | --- |
 | `mailsort auth` | Connexion à Gmail dans le navigateur ; crée ou remplace `token.json` (à lancer sur le Mac) |
 | `mailsort run` | Passage normal : nouveaux mails et labels modifiés |
-| `mailsort run --dry-run` | Même chose sans toucher Gmail, résultat en CSV |
+| `mailsort run --dry-run [--limit N \| --all] [--query …]` | Classe sans rien modifier dans Gmail : bilan par label, sans label et total, plus un CSV |
 | `mailsort resort --all` | Repose toutes les questions sur tous les mails |
 | `mailsort eval` | Compare le classement aux labels existants |
 | `mailsort messages [--query …] [--limit N]` | Liste les derniers mails (identifiant, date, expéditeur, objet), en lecture seule |

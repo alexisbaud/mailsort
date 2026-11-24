@@ -47,13 +47,17 @@ Dans la [console Google Cloud](https://console.cloud.google.com/) :
    **Desktop app** → Create → **Download JSON**. Enregistrer le fichier à la racine du projet
    sous le nom `credentials.json` (modèle : `credentials.json.example`).
 
-Puis, sur le Mac :
+Puis, sur le Mac, lancer un passage à blanc. Il ne modifie rien dans Gmail : il affiche
+combien de mails iraient dans chaque label, combien n'en auraient aucun, et le total trié
+(détail par mail dans un CSV). Par défaut sur les 200 derniers mails ; `--all` pour toute la
+boîte, `--limit N` ou `--query "…"` pour un autre périmètre.
 
 ```bash
-uv run mailsort auth
+uv run mailsort run --dry-run
 ```
 
-Le navigateur s'ouvre. Choisir le compte Gmail, puis sur l'écran « Google hasn't verified this
+La première fois, faute de jeton, le navigateur s'ouvre (on peut aussi le faire à part avec
+`uv run mailsort auth`). Choisir le compte Gmail, puis sur l'écran « Google hasn't verified this
 app » : Advanced → Go to mailsort (unsafe). C'est attendu : l'app est la tienne. Accepter le
 droit de gérer les mails (`gmail.modify` : labels et lecture, sans suppression définitive).
 

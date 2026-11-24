@@ -25,9 +25,13 @@ class FakeJev:
         failures: list[int] | None = None,
         tokens: int = 1000,
         model: str = "jev-1.14.0",
+        by_subject: Mapping[str, Mapping[str, Any]] | None = None,
     ):
+        """`by_subject` : objet du mail (champ `subject` de l'état) → {"choices": …, "nouls": …},
+        pour répondre différemment selon le mail."""
         self.choices = dict(choices or {})
         self.nouls = dict(nouls or {})
+        self.by_subject = dict(by_subject or {})
         self.failures = list(failures or [])
         self.tokens = tokens
         self.model = model
@@ -42,9 +46,13 @@ class FakeJev:
             status = self.failures.pop(0)
             return httpx.Response(status, json={"detail": f"erreur simulée {status}"})
         answers: dict[str, Any] = {}
+        state = body.get("state")
+        script = self.by_subject.get(state.get("subject"), {}) if isinstance(state, dict) else {}
+        choices = script.get("choices", self.choices)
+        nouls = script.get("nouls", self.nouls)
         for name, question in body["questions"].items():
             if question["type"] == "choice":
-                planned = self.choices.get(name, {})
+                planned = choices.get(name, {})
                 probabilities = {
                     option: planned.get(option, 0.0) for option in question["criteria"]
                 }
@@ -56,7 +64,7 @@ class FakeJev:
                     "probabilities": probabilities,
                 }
             else:
-                answers[name] = {"type": "noul", "noul": self.nouls.get(name, 0.0)}
+                answers[name] = {"type": "noul", "noul": nouls.get(name, 0.0)}
         return httpx.Response(
             200,
             json={

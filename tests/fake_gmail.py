@@ -33,8 +33,11 @@ class FakeGmailService:
         threads: dict[str, dict] | None = None,
         attachments: dict[str, str] | None = None,
         page_size: int | None = None,
+        errors: dict[str, BaseException] | None = None,
     ):
+        """`errors` : identifiant de message → erreur levée quand on le lit (il reste listé)."""
         self.email = email
+        self.errors = errors or {}
         self.messages_by_id = messages or {}
         self.threads_by_id = threads or {}
         self.attachments_by_id = attachments or {}
@@ -77,6 +80,8 @@ class _Messages:
 
     def get(self, **kwargs: Any) -> Request:
         self.service.calls.append(("messages.get", kwargs))
+        if kwargs["id"] in self.service.errors:
+            return Request(self.service.errors[kwargs["id"]])
         message = self.service.messages_by_id.get(kwargs["id"])
         if isinstance(message, BaseException) or message is None:
             return Request(message or KeyError(kwargs["id"]))

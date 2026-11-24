@@ -27,8 +27,10 @@ from mailsort.config import (
     ConfigError,
     load_config,
 )
+from mailsort.db import Database
 from mailsort.engine import NONE_OPTION
 from mailsort.prepare import MailSummary, summarize, summarize_message
+from mailsort.sorter import TOKENS_PER_MAIL_ESTIMATE, DryRun, DryRunReport, default_csv_path
 
 ConfigPath = Annotated[
     Path,
@@ -116,9 +118,15 @@ def auth() -> None:
     typer.echo("Sur le VPS : copier ce fichier à côté de .env (scp), sans le commiter.")
 
 
-def _connect_gmail() -> gmail.Gmail:
+def _connect_gmail(*, authorize_if_missing: bool = False) -> gmail.Gmail:
+    """Connexion à Gmail. Avec `authorize_if_missing`, ouvre le navigateur pour l'autorisation
+    si aucun jeton n'existe encore (usage local, sur le Mac)."""
+    token = gmail.token_path()
     try:
-        return gmail.Gmail.connect()
+        if authorize_if_missing and not token.exists():
+            typer.echo("Aucun jeton Gmail : ouverture du navigateur pour autoriser l'accès…")
+            gmail.run_auth_flow(gmail.client_secret_path(), token)
+        return gmail.Gmail.connect(token)
     except gmail.GmailError as exc:
         _fail(str(exc))
         raise  # pour le typage : _fail lève toujours
@@ -144,14 +152,113 @@ def messages(
         _fail(str(exc))
 
 
+CONFIRM_ABOVE = 500
+"""Au-delà de ce nombre de mails à envoyer à Jev, le passage à blanc demande confirmation."""
+
+
 @app.command()
 def run(
     dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Ne touche pas Gmail, écrit le résultat en CSV.")
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Passage à blanc : classe sans rien modifier dans Gmail, affiche le bilan "
+            "et écrit un CSV.",
+        ),
     ] = False,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Nombre de mails, du plus récent au plus ancien.")
+    ] = 200,
+    all_: Annotated[bool, typer.Option("--all", help="Toute la boîte (ignore --limit).")] = False,
+    query: Annotated[
+        str, typer.Option("--query", "-q", help="Recherche Gmail pour restreindre les mails.")
+    ] = gmail.DEFAULT_QUERY,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Ne pas demander confirmation.")] = False,
+    config: ConfigPath = Path("labels.yaml"),
 ) -> None:
-    """Passage normal : nouveaux mails et labels modifiés."""
-    _not_implemented("étapes 8 et 10")
+    """Passage de tri : nouveaux mails et labels modifiés."""
+    if not dry_run:
+        _not_implemented("étape 10 ; utiliser --dry-run pour un passage à blanc")
+
+    cfg = _load_config(config)
+    box = _connect_gmail(authorize_if_missing=True)
+    db_path = Path(os.environ.get("MAILSORT_DB") or "mailsort.db")
+    try:
+        client = jev.JevClient.from_env()
+    except jev.JevError as exc:
+        _fail(str(exc))
+
+    with client, Database.open(db_path) as db:
+        try:
+            dry = DryRun(box, client, db, cfg, user_addresses=_user_addresses())
+            typer.echo("Passage à blanc : rien n'est modifié dans Gmail.")
+            typer.echo("Liste des mails…")
+            messages = dry.list_messages(query, None if all_ else limit)
+            to_ask = dry.uncached_count(messages)
+            estimate = jev.cost_usd(to_ask * TOKENS_PER_MAIL_ESTIMATE)
+            typer.echo(
+                f"{len(messages)} mails à classer, dont {to_ask} à envoyer à Jev "
+                f"(coût estimé ≈ {estimate:.2f} $)."
+            )
+            if to_ask > CONFIRM_ABOVE and not yes:
+                typer.confirm("Continuer ?", abort=True)
+            with typer.progressbar(length=len(messages), label="Classement") as bar:
+                report = dry.run(messages, progress=lambda: bar.update(1))
+        except (gmail.GmailError, jev.JevError) as exc:
+            _fail(str(exc))
+
+    csv_path = default_csv_path()
+    dry.write_csv(csv_path)
+    _print_dry_run(cfg, report, csv_path)
+
+
+def _print_dry_run(cfg: Config, report: DryRunReport, csv_path: Path) -> None:
+    total = report.total
+
+    def share(count: int) -> str:
+        return f"{100 * count / total:5.1f} %" if total else "    –"
+
+    typer.echo("")
+    details = [f"{total} mails classés"]
+    if report.skipped:
+        details.append(f"{report.skipped} ignorés (envoyés, brouillons)")
+    if report.errors:
+        details.append(f"{len(report.errors)} en erreur")
+    typer.echo(" · ".join(details))
+    typer.echo(
+        f"Jev : {report.jev_calls} appel(s) · {report.input_tokens} tokens · "
+        f"{jev.cost_usd(report.input_tokens):.4f} $ · {report.cached} mail(s) repris "
+        "des réponses déjà enregistrées"
+    )
+
+    families = [
+        ("Types", "type"),
+        ("Domaines", "domain"),
+        ("Actions", "action"),
+        ("Nettoyage", "cleanup"),
+        ("Technique", "system"),
+    ]
+    for title, family in families:
+        labels = [lb for lb in cfg.labels if lb.family == family and lb.enabled]
+        if not labels:
+            continue
+        typer.echo(f"\n{title}")
+        for label in labels:
+            count = report.label_counts[label.id]
+            typer.echo(f"  {label.name:<28} {count:>6}  {share(count)}")
+
+    typer.echo("")
+    typer.echo(f"  {'Aucun label':<28} {report.no_label:>6}  {share(report.no_label)}")
+    typer.echo(
+        f"  {'Seulement 🤔 To Review':<28} {report.review_only:>6}  {share(report.review_only)}"
+    )
+    typer.echo(f"  {'Total trié':<28} {total:>6}")
+    typer.echo("Un mail peut avoir plusieurs labels : la somme des lignes dépasse le total.")
+    for message_id, error in report.errors[:5]:
+        typer.echo(f"Erreur sur {message_id} : {error}", err=True)
+    if len(report.errors) > 5:
+        typer.echo(f"… et {len(report.errors) - 5} autre(s) erreur(s).", err=True)
+    typer.echo(f"\nDétail par mail : {csv_path}")
 
 
 @app.command()

@@ -1,0 +1,266 @@
+"""Passage de tri. Pour l'instant : le passage à blanc, qui classe sans rien modifier dans Gmail.
+
+Pour chaque mail : lire le fil (réponse de l'utilisateur, dernier message), reprendre les réponses
+de Jev déjà enregistrées si leur empreinte est à jour, sinon lire le mail et interroger Jev,
+puis appliquer les règles de décision. Les réponses de Jev sont enregistrées dans la base : un
+nouveau passage à blanc (par exemple après un changement de seuil) ne rappelle pas Jev.
+Les décisions, elles, ne sont pas enregistrées, puisqu'aucun label n'est posé.
+"""
+
+from __future__ import annotations
+
+import csv
+from collections import Counter
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from mailsort.config import SECONDARY_TYPE_QUESTION, TYPE_QUESTION, Config
+from mailsort.db import Database
+from mailsort.engine import NONE_OPTION, Decision, decide, secondary_request
+from mailsort.gmail import Gmail, GmailAuthError, GmailError, GmailMessage, ThreadInfo, is_excluded
+from mailsort.jev import (
+    JevAuthError,
+    JevClient,
+    JevError,
+    ask,
+    ask_secondary,
+    stored_fingerprints,
+    to_jev_answers,
+)
+from mailsort.prepare import summarize
+
+TOKENS_PER_MAIL_ESTIMATE = 2000
+"""Moyenne mesurée : environ 1 450 tokens pour un mail court, jusqu'à 6 200 pour le plus long."""
+
+
+@dataclass
+class DryRunReport:
+    total: int = 0
+    """Mails classés (hors mails ignorés et erreurs)."""
+    label_counts: Counter[str] = field(default_factory=Counter)
+    no_label: int = 0
+    review_only: int = 0
+    """Mails dont le seul label serait 🤔 To Review."""
+    skipped: int = 0
+    """Mails ignorés : envoyés, brouillons, spams, corbeille."""
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    jev_calls: int = 0
+    input_tokens: int = 0
+    cached: int = 0
+    """Mails classés sans appeler Jev, grâce aux réponses déjà enregistrées."""
+
+
+@dataclass(frozen=True)
+class Row:
+    """Une ligne du CSV."""
+
+    message_id: str
+    date: str
+    sender: str
+    subject: str
+    decision: Decision
+    probabilities: dict[str, dict[str, float]]
+
+
+class DryRun:
+    def __init__(
+        self,
+        box: Gmail,
+        client: JevClient,
+        db: Database,
+        config: Config,
+        *,
+        user_addresses: Iterable[str] = (),
+    ):
+        self.box = box
+        self.client = client
+        self.db = db
+        self.config = config
+        self.fingerprints = stored_fingerprints(config, client.model)
+        self.user_addresses = [box.profile_email(), *user_addresses]
+        self.report = DryRunReport()
+        self.rows: list[Row] = []
+        self._threads: dict[str, ThreadInfo] = {}
+
+    # ------------------------------------------------------------------ outils
+
+    def list_messages(self, query: str | None, limit: int | None) -> list[tuple[str, str]]:
+        return list(self.box.list_messages(query, limit))
+
+    def uncached_count(self, messages: Iterable[tuple[str, str]]) -> int:
+        """Mails pour lesquels au moins une question devra être posée à Jev."""
+        return sum(1 for message_id, _ in messages if self._missing_questions(message_id))
+
+    def _missing_questions(self, message_id: str) -> list[str]:
+        answers = self.db.answers(message_id)
+        return [
+            question
+            for question, fingerprint in self.fingerprints.items()
+            if question not in answers or answers[question].fingerprint != fingerprint
+        ]
+
+    def _thread(self, thread_id: str) -> ThreadInfo:
+        if thread_id not in self._threads:
+            self._threads[thread_id] = self.box.thread_info(thread_id)
+        return self._threads[thread_id]
+
+    def _state(self, message: GmailMessage, thread: ThreadInfo) -> dict[str, Any]:
+        return summarize(
+            message.headers,
+            message.plain,
+            message.html,
+            message.attachments,
+            user_addresses=self.user_addresses,
+            user_replied=thread.user_replied,
+        ).to_state()
+
+    # --------------------------------------------------------------- un mail
+
+    def process(self, message_id: str, thread_id: str) -> None:
+        """Classe un mail. Les erreurs d'accès (clé, jeton) remontent et arrêtent le passage ;
+        les autres sont comptées et le passage continue."""
+        try:
+            self._process(message_id, thread_id)
+        except (GmailAuthError, JevAuthError):
+            raise
+        except (GmailError, JevError) as exc:
+            self.report.errors.append((message_id, str(exc)))
+
+    def _process(self, message_id: str, thread_id: str) -> None:
+        thread = self._thread(thread_id)
+        missing = self._missing_questions(message_id)
+        message: GmailMessage | None = None
+        state: dict[str, Any] | None = None
+        called_jev = False
+
+        if missing:
+            message = self.box.get_message(message_id)
+            if is_excluded(message):
+                self.report.skipped += 1
+                return
+            state = self._state(message, thread)
+            result = ask(self.client, self.config, state, missing)
+            with self.db.transaction():
+                self.db.add_message(message_id, thread_id, message.internal_date)
+                for question, probabilities in result.probabilities.items():
+                    self.db.save_answer(
+                        message_id, question, self.fingerprints[question], probabilities
+                    )
+            self._count_call(result.input_tokens)
+            called_jev = True
+
+        answers = self.db.answers(message_id)
+        probabilities = {q: answers[q].probabilities for q in self.fingerprints}
+
+        request = secondary_request(self.config, probabilities[TYPE_QUESTION])
+        if request is not None:
+            cached = answers.get(SECONDARY_TYPE_QUESTION)
+            if cached is None or set(cached.probabilities) != set(request.options):
+                if message is None:
+                    message = self.box.get_message(message_id)
+                if state is None:
+                    state = self._state(message, thread)
+                second = ask_secondary(self.client, self.config, state, request)
+                with self.db.transaction():
+                    self.db.save_answer(
+                        message_id,
+                        SECONDARY_TYPE_QUESTION,
+                        self.fingerprints[TYPE_QUESTION],
+                        second.probabilities[SECONDARY_TYPE_QUESTION],
+                    )
+                self._count_call(second.input_tokens)
+                called_jev = True
+                probabilities[SECONDARY_TYPE_QUESTION] = second.probabilities[
+                    SECONDARY_TYPE_QUESTION
+                ]
+            else:
+                probabilities[SECONDARY_TYPE_QUESTION] = cached.probabilities
+
+        decision = decide(
+            self.config, to_jev_answers(probabilities), user_replied_last=thread.last_from_user
+        )
+        self._tally(decision, called_jev)
+        headers = (
+            message.headers
+            if message is not None
+            else self.box.get_headers(message_id, ["From", "Subject", "Date"])
+        )
+        self.rows.append(
+            Row(
+                message_id=message_id,
+                date=str(headers.get("Date") or ""),
+                sender=str(headers.get("From") or ""),
+                subject=str(headers.get("Subject") or ""),
+                decision=decision,
+                probabilities=probabilities,
+            )
+        )
+
+    def _count_call(self, tokens: int) -> None:
+        self.report.jev_calls += 1
+        self.report.input_tokens += tokens
+
+    def _tally(self, decision: Decision, called_jev: bool) -> None:
+        report = self.report
+        report.total += 1
+        report.label_counts.update(decision.labels)
+        if not decision.labels:
+            report.no_label += 1
+        elif decision.labels == {"to_review"}:
+            report.review_only += 1
+        if not called_jev:
+            report.cached += 1
+
+    # ------------------------------------------------------------- ensemble
+
+    def run(
+        self,
+        messages: Iterable[tuple[str, str]],
+        progress: Callable[[], None] | None = None,
+    ) -> DryRunReport:
+        for message_id, thread_id in messages:
+            self.process(message_id, thread_id)
+            if progress:
+                progress()
+        return self.report
+
+    def write_csv(self, path: Path) -> None:
+        """Une ligne par mail classé : identifiants, en-têtes, labels, raisons, probabilités."""
+        config = self.config
+        type_options = [t.id for t in config.types] + [NONE_OPTION]
+        yes_no = [label.id for label in config.yes_no_labels]
+        order = {label.id: i for i, label in enumerate(config.labels)}
+        columns = (
+            ["message_id", "date", "from", "subject", "labels", "review_reasons"]
+            + [f"type:{o}" for o in type_options]
+            + ["secondary"]
+            + yes_no
+        )
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            for row in self.rows:
+                primary = row.probabilities[TYPE_QUESTION]
+                secondary = row.probabilities.get(SECONDARY_TYPE_QUESTION)
+                labels = sorted(row.decision.labels, key=lambda i: order.get(i, 999))
+                writer.writerow(
+                    [
+                        row.message_id,
+                        row.date,
+                        row.sender,
+                        row.subject,
+                        " ".join(config.by_id[i].name for i in labels),
+                        " | ".join(row.decision.review_reasons),
+                        *(f"{primary.get(o, 0):.3f}" for o in type_options),
+                        " ".join(f"{k}={v:.2f}" for k, v in (secondary or {}).items()),
+                        *(f"{row.probabilities[q]['yes']:.3f}" for q in yes_no),
+                    ]
+                )
+
+
+def default_csv_path(now: datetime | None = None) -> Path:
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    return Path(f"dry-run-{stamp}.csv")

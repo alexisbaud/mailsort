@@ -28,9 +28,15 @@ def test_version():
 
 
 def test_stub_commands_fail_cleanly():
-    result = runner.invoke(app, ["run", "--dry-run"])
+    result = runner.invoke(app, ["run"])
     assert result.exit_code == 1
     assert "Pas encore implémenté" in result.output
+
+
+def test_dry_run_without_credentials_does_not_open_browser():
+    result = runner.invoke(app, ["run", "--dry-run"])
+    assert result.exit_code == 1
+    assert "credentials.json.example" in result.output
 
 
 def test_clean_command_on_fixture():
@@ -179,3 +185,57 @@ def test_auth_without_client_secret(monkeypatch, tmp_path):
     result = runner.invoke(app, ["auth"])
     assert result.exit_code == 1
     assert "credentials.json.example" in result.output
+
+
+def test_dry_run_command(monkeypatch, tmp_path):
+    import os
+    from pathlib import Path
+
+    from fake_gmail import gmail_message
+    from fake_jev import FakeJev
+
+    from mailsort import jev
+    from mailsort.config import TYPE_QUESTION
+
+    labels = Path(__file__).resolve().parent.parent / "labels.yaml"
+    Path(os.environ["GOOGLE_TOKEN_FILE"]).write_text("{}")  # le jeton existe : pas d'autorisation
+    _fake_box(
+        monkeypatch,
+        messages={
+            "m1": gmail_message("m1", "t1", Subject="Facture"),
+            "m2": gmail_message("m2", "t2", Subject="Rien"),
+        },
+        threads={
+            "t1": {"messages": [{"labelIds": ["INBOX"], "internalDate": "1"}]},
+            "t2": {"messages": [{"labelIds": ["INBOX"], "internalDate": "1"}]},
+        },
+    )
+    fake = FakeJev(
+        by_subject={
+            "Facture": {"choices": {TYPE_QUESTION: {"payments": 0.95, jev.NONE_CHOICE: 0.05}}},
+            "Rien": {"choices": {TYPE_QUESTION: {jev.NONE_CHOICE: 1.0}}},
+        }
+    )
+    monkeypatch.setattr(
+        jev.JevClient,
+        "from_env",
+        classmethod(lambda cls: cls("k", transport=fake.transport(), max_requests_per_second=0)),
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["run", "--dry-run", "--config", str(labels)])
+    assert result.exit_code == 0, result.output
+    assert "rien n'est modifié dans Gmail" in result.output
+    assert "2 mails à classer, dont 2 à envoyer à Jev" in result.output
+    counts = {}
+    for line in result.output.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1] == "%" and parts[-3].isdigit():
+            counts[" ".join(parts[:-3])] = int(parts[-3])
+        elif parts[:2] == ["Total", "trié"]:
+            counts["Total trié"] = int(parts[-1])
+    assert counts["💳 Payments"] == 1
+    assert counts["🤔 To Review"] == 1
+    assert counts["Seulement 🤔 To Review"] == 1
+    assert counts["Aucun label"] == 0
+    assert counts["Total trié"] == 2
+    assert len(list(tmp_path.glob("dry-run-*.csv"))) == 1
