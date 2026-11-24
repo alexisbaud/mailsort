@@ -1,0 +1,44 @@
+From: Jean Dupont <jean@example.net>
+To: Alexis <alexis@example.com>
+Subject: Fwd: Votre attestation de loyer
+Date: Tue, 24 Nov 2026 09:30:00 +0000
+Message-ID: <8189574113472424336@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============0274395676434894794=="
+
+--===============0274395676434894794==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Salut, je te transf=C3=A8re l'attestation pour ton dossier d'aide au logement.
+Jean
+
+---------- Forwarded message ---------
+De : Agence Exemple Immobilier <contact@agence.example.com>
+Date: lun. 16 nov. 2026 =C3=A0 09:15
+Subject: Votre attestation de loyer
+To: Jean Dupont <jean@example.net>
+
+
+Bonjour Monsieur Dupont,
+
+Veuillez trouver ci-joint l'attestation de loyer pour le logement situ=C3=A9 =
+12 rue des Exemples.
+
+Cordialement,
+L'agence
+
+Le ven. 13 nov. 2026 =C3=A0 17:40, Jean Dupont <jean@example.net> a =C3=A9cri=
+t :
+> Bonjour, pourriez-vous m'envoyer une attestation de loyer ?
+> Merci d'avance.
+
+--===============0274395676434894794==
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="attestation_loyer.pdf"
+MIME-Version: 1.0
+
+JVBERi0xLjQgZmljaGllciBmYWN0aWNl
+
+--===============0274395676434894794==--

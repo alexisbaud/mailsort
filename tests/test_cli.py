@@ -31,3 +31,14 @@ def test_stub_commands_fail_cleanly():
     result = runner.invoke(app, ["run", "--dry-run"])
     assert result.exit_code == 1
     assert "Pas encore implémenté" in result.output
+
+
+def test_clean_command_on_fixture():
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "forward.eml"
+    result = runner.invoke(app, ["clean", str(fixture)])
+    assert result.exit_code == 0, result.output
+    assert "transfert" in result.output
+    assert "attestation_loyer.pdf" in result.output
+    assert "Veuillez trouver ci-joint" in result.output

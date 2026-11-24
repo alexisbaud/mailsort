@@ -216,12 +216,12 @@ Jev reçoit un résumé structuré de chaque mail. Le texte est d'abord nettoyé
 1. **Choisir la version du mail** : la version texte si elle a du contenu, sinon le HTML converti en texte (BeautifulSoup ou html2text), sans styles, scripts ni blocs cachés comme les pré-en-têtes invisibles.
 2. **Retirer les caractères invisibles** : espaces de largeur nulle, traits d'union conditionnels et autres caractères Unicode qui ne s'affichent pas.
 3. **Retirer la mise en forme** : URL (le texte du lien est gardé), barres de tableaux, lignes vides en série.
-4. **Retirer l'historique des réponses** : lignes citées et tout ce qui suit « Le … a écrit : », « On … wrote: » ou « De : … Envoyé : » (bibliothèque `email-reply-parser` ou équivalent).
+4. **Retirer l'historique des réponses** : lignes citées et tout ce qui suit « Le … a écrit : », « On … wrote: », « -----Original Message----- » ou un bloc « De : … Envoyé : … À : … Objet : ». Ces règles sont écrites dans le programme plutôt que confiées à `email-reply-parser`, qui vise surtout les formules anglaises.
 5. **Garder le contenu transféré** : pour un transfert, le message d'origine est l'information utile, il n'est donc pas retiré.
 6. **Retirer la signature** quand elle est repérable.
-7. **Limiter à 5 000 tokens**, en gardant le début du texte.
+7. **Limiter à 5 000 tokens**, en gardant le début du texte. Le tokeniseur de Jev n'étant pas connu, la limite est estimée à 4 caractères par token, soit 20 000 caractères ; un texte coupé se termine par « […] ».
 
-`mailsort explain` affiche le texte nettoyé, tel que Jev l'a reçu. Des tests automatiques couvrent les cas types : mail à pré-en-tête invisible, réponse avec historique, transfert, newsletter longue.
+`mailsort explain` affiche le texte nettoyé, tel que Jev l'a reçu. `mailsort clean <fichier.eml>` fait de même pour un mail téléchargé depuis Gmail, sans réseau. Des tests automatiques couvrent les cas types : mail à pré-en-tête invisible, réponse avec historique, transfert, newsletter longue, ainsi que les formats Outlook, Apple Mail et Gmail en français et en anglais.
 
 **Sécurité :**
 
@@ -265,6 +265,7 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | `mailsort resort --all` | Repose toutes les questions sur tous les mails |
 | `mailsort eval` | Compare le classement aux labels existants |
 | `mailsort explain <id du mail>` | Affiche la probabilité de chaque label pour un mail |
+| `mailsort clean <fichier.eml>` | Affiche le texte nettoyé d'un mail téléchargé, sans réseau |
 | `mailsort corrections` | Liste les corrections manuelles par label |
 | `mailsort labels check` | Valide `labels.yaml` sans rien toucher |
 | `mailsort labels delete <id> --confirm` | Supprime un label retiré du fichier |

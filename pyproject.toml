@@ -5,6 +5,7 @@ description = "Tri automatique des e-mails Gmail par Jev"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "pydantic>=2.14.4",
     "pyyaml>=6.0.4",
     "typer>=0.29.2",

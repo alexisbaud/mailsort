@@ -10,6 +10,13 @@ from typing import Annotated
 import typer
 
 from mailsort import __version__
+from mailsort.clean import (
+    CHARS_PER_TOKEN,
+    attachment_names,
+    bodies_from_message,
+    clean_email_text,
+    load_eml,
+)
 from mailsort.config import FAMILIES, ConfigError, load_config
 
 ConfigPath = Annotated[
@@ -90,6 +97,40 @@ def eval_() -> None:
 def explain(message_id: Annotated[str, typer.Argument(help="Identifiant Gmail du mail.")]) -> None:
     """Affiche le texte nettoyé et la probabilité de chaque label pour un mail."""
     _not_implemented("étape 7")
+
+
+@app.command()
+def clean(
+    eml: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Fichier .eml (dans Gmail : ⋮ → « Télécharger le message »).",
+        ),
+    ],
+) -> None:
+    """Affiche le texte nettoyé d'un fichier .eml, tel que Jev le recevrait (sans réseau)."""
+    message = load_eml(eml)
+    plain, html = bodies_from_message(message)
+    subject = str(message["subject"] or "")
+    result = clean_email_text(plain, html, subject=subject)
+
+    details = [
+        f"version {result.source}",
+        f"{len(result.text)} caractères (≈ {len(result.text) // CHARS_PER_TOKEN} tokens)",
+    ]
+    if result.forwarded:
+        details.append("transfert")
+    if result.truncated:
+        details.append("tronqué")
+    typer.echo(f"Objet : {subject}")
+    typer.echo(" · ".join(details))
+    attachments = attachment_names(message)
+    if attachments:
+        typer.echo(f"Pièces jointes : {', '.join(attachments)}")
+    typer.echo("─" * 60)
+    typer.echo(result.text)
 
 
 @app.command()
