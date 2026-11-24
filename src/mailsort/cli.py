@@ -3,13 +3,15 @@
 Les commandes sont encore vides : chacune sera branchée à l'étape du plan indiquée.
 """
 
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from dotenv import find_dotenv, load_dotenv
 
-from mailsort import __version__
+from mailsort import __version__, jev
 from mailsort.clean import (
     CHARS_PER_TOKEN,
     attachment_names,
@@ -17,7 +19,16 @@ from mailsort.clean import (
     clean_email_text,
     load_eml,
 )
-from mailsort.config import FAMILIES, ConfigError, load_config
+from mailsort.config import (
+    FAMILIES,
+    SECONDARY_TYPE_QUESTION,
+    TYPE_QUESTION,
+    Config,
+    ConfigError,
+    load_config,
+)
+from mailsort.engine import NONE_OPTION
+from mailsort.prepare import summarize_message
 
 ConfigPath = Annotated[
     Path,
@@ -43,6 +54,34 @@ def _not_implemented(step: str) -> None:
     raise typer.Exit(code=1)
 
 
+def _fail(message: str) -> None:
+    typer.echo(message, err=True)
+    raise typer.Exit(code=1)
+
+
+def _load_config(path: Path) -> Config:
+    try:
+        return load_config(path)
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _user_addresses() -> list[str]:
+    raw = os.environ.get("MAILSORT_USER_EMAILS", "")
+    return [address.strip() for address in raw.split(",") if address.strip()]
+
+
+EmlPath = Annotated[
+    Path,
+    typer.Argument(
+        exists=True,
+        dir_okay=False,
+        help="Fichier .eml (dans Gmail : ⋮ → « Télécharger le message »).",
+    ),
+]
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"mailsort {__version__}")
@@ -59,6 +98,8 @@ def main(
     ] = False,
 ) -> None:
     """Tri automatique des e-mails Gmail par Jev."""
+    # Les variables déjà définies dans l'environnement ne sont pas écrasées.
+    load_dotenv(find_dotenv(usecwd=True))
 
 
 @app.command()
@@ -100,16 +141,7 @@ def explain(message_id: Annotated[str, typer.Argument(help="Identifiant Gmail du
 
 
 @app.command()
-def clean(
-    eml: Annotated[
-        Path,
-        typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Fichier .eml (dans Gmail : ⋮ → « Télécharger le message »).",
-        ),
-    ],
-) -> None:
+def clean(eml: EmlPath) -> None:
     """Affiche le texte nettoyé d'un fichier .eml, tel que Jev le recevrait (sans réseau)."""
     message = load_eml(eml)
     plain, html = bodies_from_message(message)
@@ -134,6 +166,75 @@ def clean(
 
 
 @app.command()
+def classify(eml: EmlPath, config: ConfigPath = Path("labels.yaml")) -> None:
+    """Classe un fichier .eml avec Jev et affiche probabilités et labels (sans toucher Gmail)."""
+    cfg = _load_config(config)
+    message = load_eml(eml)
+    summary = summarize_message(message, user_addresses=_user_addresses())
+    try:
+        with jev.JevClient.from_env() as client:
+            result = jev.classify(client, cfg, summary.to_state())
+    except jev.JevError as exc:
+        _fail(str(exc))
+
+    by_id = cfg.by_id
+    decision = result.decision
+    mark = {True: "✔", False: " "}
+
+    typer.echo(f"Objet : {summary.subject}")
+    typer.echo(
+        f"Texte : version {summary.body.source} · {len(summary.body.text)} caractères"
+        + (" · tronqué" if summary.body.truncated else "")
+    )
+    typer.echo(
+        f"Jev ({result.model}) : {result.calls} appel(s) · {result.input_tokens} tokens"
+        f" · {result.cost_usd:.6f} $"
+    )
+
+    types = cfg.settings.types
+    typer.echo(f"\nType (seuil {types.primary_min:.2f})")
+    for option, probability in sorted(
+        result.probabilities[TYPE_QUESTION].items(), key=lambda item: -item[1]
+    ):
+        name = "None of the above" if option == NONE_OPTION else by_id[option].name
+        typer.echo(f"  {mark[option == decision.primary_type]} {name:<28} {probability:.2f}")
+
+    if result.secondary is None:
+        typer.echo("Second passage : non demandé")
+    else:
+        candidate = result.secondary.candidate
+        second = result.probabilities[SECONDARY_TYPE_QUESTION].get(candidate, 0.0)
+        typer.echo(
+            f"Second passage : {by_id[candidate].name} {second:.2f}"
+            f" (seuil {types.secondary_min:.2f}) {mark[decision.secondary_type == candidate]}"
+        )
+
+    doubtful = {d.label_id for d in decision.doubts}
+    typer.echo("\nQuestions oui/non")
+    for label in cfg.yes_no_labels:
+        probability = result.probabilities[label.id]["yes"]
+        if label.id in decision.labels:
+            flag = "✔"
+        elif label.id in doubtful:
+            flag = "?"
+        elif label.id in decision.blocked:
+            flag = "⊘"
+        else:
+            flag = " "
+        typer.echo(
+            f"  {flag} {label.name:<28} {probability:.2f} (seuil {cfg.threshold_for(label):.2f})"
+        )
+
+    names = [by_id[i].name for i in sorted(decision.labels, key=list(by_id).index)]
+    typer.echo(f"\nLabels posés : {', '.join(names) if names else 'aucun'}")
+    if decision.blocked:
+        blocked = ", ".join(by_id[i].name for i in sorted(decision.blocked))
+        typer.echo(f"Bloqués par une protection : {blocked}")
+    for reason in decision.review_reasons:
+        typer.echo(f"🤔 {reason}")
+
+
+@app.command()
 def corrections() -> None:
     """Liste les corrections manuelles par label."""
     _not_implemented("étape 10")
@@ -142,12 +243,7 @@ def corrections() -> None:
 @labels_app.command("check")
 def labels_check(config: ConfigPath = Path("labels.yaml")) -> None:
     """Valide labels.yaml sans rien toucher, et résume son contenu."""
-    try:
-        cfg = load_config(config)
-    except ConfigError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-
+    cfg = _load_config(config)
     counts = Counter(label.family for label in cfg.labels)
     summary = ", ".join(f"{counts[f]} {f}" for f in FAMILIES if counts[f])
     disabled = [label.id for label in cfg.labels if not label.enabled]

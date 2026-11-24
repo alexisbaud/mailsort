@@ -24,6 +24,8 @@ Tout le tri passe par Jev : les filtres Gmail actuels seront supprimés une fois
 | 🗑️ Deletable | Label seulement : Alexis supprime lui-même par lots |
 | Texte envoyé à Jev | Nettoyé, puis limité à 5 000 tokens |
 | Modifier les labels | Éditer `labels.yaml` avec Claude Code ; une interface web en v2 |
+| Accès Jev | API directe de TypeSafe (endpoint System One), clé dans `.env` ; version épinglée (`jev-1.14.0`) |
+| Secrets | Le dépôt ne contient que des modèles `*.example` ; Alexis les duplique sans le suffixe et les remplit |
 | Accès Gmail | OAuth, avec l'app Google publiée en « In production » ; jeton créé sur le Mac par `mailsort auth`, puis copié sur le VPS |
 | Bilan des passages | Le journal sur le VPS uniquement, erreurs comprises ; aucune notification envoyée |
 | Suppression de mails | Jamais par le programme |
@@ -38,7 +40,7 @@ Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou emp
    - l'**empreinte des règles** (seuils, `enabled`, `never_with`, `protects_from`) : si elle change, les règles sont recalculées sur tous les mails à partir des probabilités enregistrées, sans appeler Jev.
 3. **Lister les mails à traiter.** Ce sont les messages jamais traités, plus tous les messages si un label est à re-évaluer. Le programme ignore les spams, la corbeille, les brouillons et les messages envoyés par Alexis.
 4. **Préparer chaque mail.** Il extrait l'expéditeur, les destinataires, l'objet, la date, les en-têtes de liste de diffusion, les noms des pièces jointes et le texte nettoyé et tronqué (voir la section sur les données envoyées).
-5. **Interroger Jev.** Un appel par mail : le mail est l'« état ». Les types forment une seule question à choix (les 7 types plus « None of the above ») ; chaque autre label est une question oui/non construite à partir de sa description. Jev renvoie une probabilité par option et par label. Un second appel, limité aux types, peut suivre pour chercher un type secondaire (section Règles de décision).
+5. **Interroger Jev.** Un appel par mail : le mail est l'« état ». Les types forment une seule question à choix (question `choice` : les 7 types plus « None of the above ») ; chaque autre label est une question oui/non (question `noul`) construite à partir de sa description. Jev renvoie une probabilité par option et par label. Un second appel, limité aux types, peut suivre pour chercher un type secondaire (section Règles de décision).
 6. **Appliquer les règles.** Le code applique les seuils, les exclusions et les protections (section Règles de décision).
 7. **Mettre à jour Gmail.** Le programme ajoute les labels gagnés et retire ceux qu'il avait posés et qui ne s'appliquent plus. Il ne touche jamais un label qu'Alexis a corrigé à la main.
 8. **Enregistrer.** Une base SQLite garde, pour chaque message, les probabilités de chaque question avec son empreinte, les labels posés par le programme et l'empreinte des règles utilisée. Elle garde aussi les verrous, l'historique des corrections, le lien entre chaque label et son label Gmail, et le bilan des passages. Chaque message est enregistré d'un bloc (transaction) : un passage interrompu ne laisse pas de message à moitié traité. Le schéma est versionné, et une nouvelle version du programme met la base à jour au démarrage.
@@ -187,7 +189,9 @@ Au démarrage, le programme valide le fichier : `id` en double, famille inconnue
 
 Un changement de label déclenche le retri de toute la boîte, mais seules les questions des labels modifiés sont reposées à Jev. Les règles, elles, sont recalculées pour tous les labels.
 
-**Retri complet forcé** : la commande `mailsort resort --all` repose toutes les questions sur tous les mails, par exemple après une nouvelle version de Jev.
+**Retri complet forcé** : la commande `mailsort resort --all` repose toutes les questions sur tous les mails.
+
+**Nouvelle version de Jev** : la version est épinglée dans `.env` (`JEV_MODEL`). L'empreinte enregistrée pour chaque réponse inclut cette version et celle des consignes envoyées à Jev : changer `JEV_MODEL` fait donc reposer toutes les questions au passage suivant, sans commande à lancer.
 
 **Corrections manuelles** : à chaque passage, le programme compare les labels présents dans Gmail avec ceux qu'il a posés la dernière fois.
 
@@ -228,9 +232,9 @@ Jev reçoit un résumé structuré de chaque mail. Le texte est d'abord nettoyé
 - l'accès Gmail utilise le droit « modifier » (scope `gmail.modify`), qui permet de gérer les labels mais pas de supprimer définitivement un mail ;
 - l'app Google est publiée en statut « In production », sans vérification Google (dispense pour un usage personnel). En statut « Testing », le jeton de rafraîchissement expirerait au bout de 7 jours. À la connexion, Google affiche « Google hasn't verified this app » : c'est attendu ;
 - le jeton est créé sur le Mac par `mailsort auth`, qui ouvre le navigateur et écrit `token.json`. Le fichier est ensuite copié sur le VPS (`scp`), qui n'a pas de navigateur. Le jeton peut encore être révoqué si Alexis change son mot de passe Google ou retire l'accès à l'app : il suffit alors de relancer `mailsort auth` et de recopier le fichier ;
-- les clés (Gmail et Jev) restent dans un fichier `.env` sur le VPS, jamais dans le dépôt ;
+- les clés (Gmail et Jev) restent dans un fichier `.env`, jamais dans le dépôt. Le dépôt contient `.env.example`, qu'Alexis duplique en `.env` et remplit ;
 - le texte des mails n'est pas stocké dans la base, seulement les identifiants, les probabilités et les labels ;
-- à vérifier pendant le développement : si l'accès à Jev propose une option de non-conservation des données, l'activer.
+- conservation des données chez TypeSafe (vérifié en novembre 2026) : Jev n'est pas entraîné sur les requêtes des clients. La non-conservation (« zero data retention ») n'est proposée qu'aux comptes entreprise, sur demande au support ; la documentation ne prévoit aucune option à activer dans les requêtes.
 
 ## Coût estimé
 
@@ -243,9 +247,9 @@ Trier 1 000 mails coûte environ 0,10 à 0,13 $ (au pire 0,30 $ avec beaucoup de
 | 1 choix de type (8 options) et 10 questions oui/non, avec leurs descriptions | ≈ 1 350 |
 | **Total** | **≈ 2 400, soit ≈ 0,0001 $** |
 
-**Accès à Jev :** TypeSafe a suspendu les nouvelles inscriptions à son API directe. Vercel AI Gateway donne accès à Jev, avec 5 $ de crédit mensuel par équipe Vercel, soit environ 119 millions de tokens selon la même source. Pour ce volume, le tri serait donc gratuit. Le second passage des types ne concerne qu'une partie des mails et ne coûte qu'un petit appel de plus.
+**Accès à Jev :** Alexis a un compte TypeSafe et crée sa clé dans la console. Le programme appelle directement l'API (`https://api.typesafe.ai/v1/systemone`) et la version de Jev est épinglée (`jev-1.14.0`). Le second passage des types ne concerne qu'une partie des mails et ne coûte qu'un petit appel de plus. `mailsort classify` affiche le nombre de tokens et le coût réel de chaque mail.
 
-**Limites de débit :** 80 requêtes et 100 000 tokens par seconde. Un retri complet doit donc espacer ses appels, mais l'API Gmail sera le vrai facteur limitant.
+**Limites de débit :** elles sont fixées par organisation et visibles dans la console TypeSafe ; la documentation ne publie pas de valeurs. Le programme se limite à 10 appels par seconde par défaut (`JEV_MAX_REQUESTS_PER_SECOND` dans `.env`). En cas de surcharge (429, 529) ou d'erreur serveur ou réseau, il réessaie jusqu'à 5 fois avec un délai croissant, en suivant l'en-tête `Retry-After` s'il est présent. L'API Gmail restera le vrai facteur limitant.
 
 ## Mise en route
 
@@ -266,6 +270,7 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | `mailsort eval` | Compare le classement aux labels existants |
 | `mailsort explain <id du mail>` | Affiche la probabilité de chaque label pour un mail |
 | `mailsort clean <fichier.eml>` | Affiche le texte nettoyé d'un mail téléchargé, sans réseau |
+| `mailsort classify <fichier.eml>` | Classe un mail téléchargé avec Jev et affiche probabilités, labels et coût, sans toucher Gmail |
 | `mailsort corrections` | Liste les corrections manuelles par label |
 | `mailsort labels check` | Valide `labels.yaml` sans rien toucher |
 | `mailsort labels delete <id> --confirm` | Supprime un label retiré du fichier |
