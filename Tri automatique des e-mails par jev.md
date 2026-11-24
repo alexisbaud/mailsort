@@ -92,6 +92,18 @@ Jev donne une probabilité entre 0 et 1 pour chaque label ; le code décide ensu
 
 🤔 To Review disparaît dès qu'Alexis pose ou retire à la main un label de la famille concernée : sa correction tranche.
 
+**Précisions appliquées par le code :**
+
+- si « None of the above » gagne avec moins de 0,60, le mail reçoit aussi 🤔 To Review : le choix de type est incertain ;
+- en cas d'égalité entre deux options, la première dans l'ordre de `labels.yaml` gagne ;
+- les paires interdites valent dans les deux sens. Le second passage n'est pas demandé si le type candidat forme une paire interdite avec le gagnant : il ne pourrait pas être posé, l'appel serait inutile ;
+- le type secondaire ne crée jamais de doute : sous 0,70, il est simplement ignoré ;
+- un doute sur un label bloqué par une protection, ou sur ✉️ To Reply alors qu'Alexis a déjà répondu, n'en est pas un ;
+- une fois ✉️ To Reply retiré par la règle 6, il ne protège plus de 🗑️ Deletable ;
+- les corrections manuelles passent avant les protections : un label posé à la main n'est jamais retiré par une protection, et il protège comme un label posé par le programme ;
+- ✉️ To Reply ne compte pas comme repère pour la règle 8 ;
+- retirer à la main 🤔 To Review le verrouille « absent » : il n'est plus jamais reposé sur ce mail.
+
 ## Configuration des labels
 
 Tous les labels vivent dans un seul fichier, `labels.yaml`. Alexis le modifie avec Claude Code, puis l'envoie sur le VPS. Le programme crée lui-même les labels Gmail : rien à créer à la main.

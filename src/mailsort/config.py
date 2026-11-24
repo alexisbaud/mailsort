@@ -28,6 +28,8 @@ FAMILIES: tuple[str, ...] = ("type", "domain", "action", "cleanup", "system")
 YES_NO_FAMILIES = frozenset({"domain", "action", "cleanup"})
 
 REVIEW_LABEL_ID = "to_review"
+REPLY_LABEL_ID = "to_reply"
+"""Label retiré dès que le dernier message du fil vient de l'utilisateur (règle 6)."""
 TYPE_QUESTION = "@types"
 """Clé de l'empreinte partagée par tous les types (un `id` de label ne peut pas contenir `@`)."""
 
