@@ -208,7 +208,7 @@ Jev reçoit un résumé structuré de chaque mail. Le texte est d'abord nettoyé
 | Donnée | Pourquoi |
 | --- | --- |
 | Expéditeur (nom et adresse) | Distinguer une personne d'un envoi automatique |
-| Place d'Alexis : destinataire direct, en copie ou via une liste | Repérer les envois de masse |
+| Place d'Alexis : destinataire direct, en copie ou via une liste (adresse du compte Gmail, plus les alias de `MAILSORT_USER_EMAILS`) | Repérer les envois de masse |
 | Objet et date | Signal principal |
 | Présence d'un lien de désinscription ou d'un en-tête de liste de diffusion | Fort indice de 📰 Newsletters ou 📣 Marketing |
 | Noms des pièces jointes | Une « facture.pdf » aide 💳 Payments |
@@ -268,7 +268,8 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | `mailsort run --dry-run` | Même chose sans toucher Gmail, résultat en CSV |
 | `mailsort resort --all` | Repose toutes les questions sur tous les mails |
 | `mailsort eval` | Compare le classement aux labels existants |
-| `mailsort explain <id du mail>` | Affiche la probabilité de chaque label pour un mail |
+| `mailsort messages [--query …] [--limit N]` | Liste les derniers mails (identifiant, date, expéditeur, objet), en lecture seule |
+| `mailsort explain <id du mail>` | Affiche ce que Jev reçoit pour un mail, ses probabilités et les labels décidés, sans modifier Gmail ; `--text-only` n'appelle pas Jev |
 | `mailsort clean <fichier.eml>` | Affiche le texte nettoyé d'un mail téléchargé, sans réseau |
 | `mailsort classify <fichier.eml>` | Classe un mail téléchargé avec Jev et affiche probabilités, labels et coût, sans toucher Gmail |
 | `mailsort corrections` | Liste les corrections manuelles par label |

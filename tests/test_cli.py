@@ -79,3 +79,103 @@ def test_classify_without_key_explains_what_to_do():
     result = runner.invoke(app, ["classify", str(fixture)])
     assert result.exit_code == 1
     assert ".env.example" in result.output
+
+
+def _fake_box(monkeypatch, **service_kwargs):
+    from fake_gmail import FakeGmailService
+
+    from mailsort import gmail
+
+    service = FakeGmailService(**service_kwargs)
+    monkeypatch.setattr(gmail.Gmail, "connect", classmethod(lambda cls, token=None: cls(service)))
+    return service
+
+
+def test_messages_command(monkeypatch):
+    from fake_gmail import gmail_message
+
+    _fake_box(monkeypatch, messages={"m1": gmail_message("m1"), "m2": gmail_message("m2")})
+    result = runner.invoke(app, ["messages", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("m1")
+    assert "Votre facture n° 42" in lines[0]
+
+
+def test_explain_text_only(monkeypatch):
+    from fake_gmail import gmail_message
+
+    _fake_box(
+        monkeypatch,
+        messages={"m1": gmail_message()},
+        threads={"t1": {"messages": [{"labelIds": ["INBOX"], "internalDate": "1"}]}},
+    )
+    result = runner.invoke(app, ["explain", "m1", "--text-only"])
+    assert result.exit_code == 0, result.output
+    assert "user_is : direct recipient (To)" in result.output
+    assert "attachments : ['facture.pdf']" in result.output
+    assert "Bonjour, voici la facture." in result.output
+    assert "Type (seuil" not in result.output
+
+
+def test_explain_with_jev_applies_rule_6(monkeypatch):
+    from fake_gmail import gmail_message
+    from fake_jev import FakeJev
+
+    from mailsort import jev
+    from mailsort.config import TYPE_QUESTION
+
+    _fake_box(
+        monkeypatch,
+        messages={"m1": gmail_message()},
+        threads={
+            "t1": {
+                "messages": [
+                    {"labelIds": ["INBOX"], "internalDate": "1"},
+                    {"labelIds": ["SENT"], "internalDate": "2"},
+                ]
+            }
+        },
+    )
+    fake = FakeJev(
+        choices={TYPE_QUESTION: {"payments": 0.95, jev.NONE_CHOICE: 0.05}},
+        nouls={"to_reply": 0.9},
+    )
+    monkeypatch.setattr(
+        jev.JevClient,
+        "from_env",
+        classmethod(lambda cls: cls("k", transport=fake.transport(), max_requests_per_second=0)),
+    )
+    result = runner.invoke(app, ["explain", "m1"])
+    assert result.exit_code == 0, result.output
+    assert fake.requests[0]["state"]["user_already_replied_in_thread"] is True
+    assert "Dernier message du fil envoyé par toi : oui" in result.output
+    assert "Labels posés : 💳 Payments" in result.output
+    assert "To Reply" not in result.output.split("Labels posés")[1]
+
+
+def test_explain_excluded_message_is_flagged(monkeypatch):
+    from fake_gmail import gmail_message
+
+    _fake_box(
+        monkeypatch,
+        messages={"m1": gmail_message(labels=("SENT",))},
+        threads={"t1": {"messages": []}},
+    )
+    result = runner.invoke(app, ["explain", "m1", "--text-only"])
+    assert "serait ignoré par le tri (SENT)" in result.output
+
+
+def test_gmail_auth_error_is_explicit(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "token.json"))
+    result = runner.invoke(app, ["messages"])
+    assert result.exit_code == 1
+    assert "mailsort auth" in result.output
+
+
+def test_auth_without_client_secret(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET_FILE", str(tmp_path / "credentials.json"))
+    result = runner.invoke(app, ["auth"])
+    assert result.exit_code == 1
+    assert "credentials.json.example" in result.output

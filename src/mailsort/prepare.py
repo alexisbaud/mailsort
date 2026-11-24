@@ -96,24 +96,45 @@ def _has_list_headers(message: Message) -> bool:
     return precedence in _BULK_PRECEDENCE
 
 
+def summarize(
+    headers: Message,
+    plain: str | None,
+    html: str | None,
+    attachments: Iterable[str],
+    *,
+    user_addresses: Iterable[str] = (),
+    user_replied: bool | None = None,
+) -> MailSummary:
+    """Résumé à partir des en-têtes, des versions texte et HTML et des noms de pièces jointes."""
+    subject = str(headers.get("Subject") or "")
+    raw_bodies = " ".join(part for part in (plain, html) if part)
+    return MailSummary(
+        sender=str(headers.get("From") or ""),
+        user_position=user_position(headers, user_addresses),
+        subject=subject,
+        date=_iso_date(headers),
+        list_headers=_has_list_headers(headers),
+        unsubscribe_link=bool(headers.get("List-Unsubscribe"))
+        or bool(_UNSUBSCRIBE.search(raw_bodies)),
+        attachments=tuple(attachments),
+        user_replied=user_replied,
+        body=clean_email_text(plain, html, subject=subject),
+    )
+
+
 def summarize_message(
     message: Message,
     *,
     user_addresses: Iterable[str] = (),
     user_replied: bool | None = None,
 ) -> MailSummary:
+    """Résumé d'un mail lu depuis un fichier .eml."""
     plain, html = bodies_from_message(message)
-    subject = str(message.get("Subject") or "")
-    raw_bodies = " ".join(part for part in (plain, html) if part)
-    return MailSummary(
-        sender=str(message.get("From") or ""),
-        user_position=user_position(message, user_addresses),
-        subject=subject,
-        date=_iso_date(message),
-        list_headers=_has_list_headers(message),
-        unsubscribe_link=bool(message.get("List-Unsubscribe"))
-        or bool(_UNSUBSCRIBE.search(raw_bodies)),
-        attachments=tuple(attachment_names(message)),
+    return summarize(
+        message,
+        plain,
+        html,
+        attachment_names(message),
+        user_addresses=user_addresses,
         user_replied=user_replied,
-        body=clean_email_text(plain, html, subject=subject),
     )

@@ -11,7 +11,7 @@ from typing import Annotated
 import typer
 from dotenv import find_dotenv, load_dotenv
 
-from mailsort import __version__, jev
+from mailsort import __version__, gmail, jev
 from mailsort.clean import (
     CHARS_PER_TOKEN,
     attachment_names,
@@ -28,7 +28,7 @@ from mailsort.config import (
     load_config,
 )
 from mailsort.engine import NONE_OPTION
-from mailsort.prepare import summarize_message
+from mailsort.prepare import MailSummary, summarize, summarize_message
 
 ConfigPath = Annotated[
     Path,
@@ -105,7 +105,43 @@ def main(
 @app.command()
 def auth() -> None:
     """Connexion à Gmail dans le navigateur ; crée ou remplace token.json (à lancer sur le Mac)."""
-    _not_implemented("étape 7")
+    secret, token = gmail.client_secret_path(), gmail.token_path()
+    typer.echo("Ouverture du navigateur pour autoriser l'accès à Gmail…")
+    try:
+        gmail.run_auth_flow(secret, token)
+        email = gmail.Gmail.connect(token).profile_email()
+    except gmail.GmailError as exc:
+        _fail(str(exc))
+    typer.echo(f"Accès autorisé pour {email}. Jeton écrit dans {token} (droits 600).")
+    typer.echo("Sur le VPS : copier ce fichier à côté de .env (scp), sans le commiter.")
+
+
+def _connect_gmail() -> gmail.Gmail:
+    try:
+        return gmail.Gmail.connect()
+    except gmail.GmailError as exc:
+        _fail(str(exc))
+        raise  # pour le typage : _fail lève toujours
+
+
+@app.command()
+def messages(
+    query: Annotated[
+        str, typer.Option("--query", "-q", help="Recherche Gmail, comme dans la barre de Gmail.")
+    ] = gmail.DEFAULT_QUERY,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Nombre de mails.")] = 10,
+) -> None:
+    """Liste les derniers mails (identifiant, date, expéditeur, objet), en lecture seule."""
+    box = _connect_gmail()
+    try:
+        for message_id, _ in box.list_messages(query, limit):
+            headers = box.get_headers(message_id, ["From", "Subject", "Date"])
+            sender = str(headers.get("From") or "")[:30]
+            subject = str(headers.get("Subject") or "")[:60]
+            date = str(headers.get("Date") or "")[:16]
+            typer.echo(f"{message_id}  {date:<16}  {sender:<30}  {subject}")
+    except gmail.GmailError as exc:
+        _fail(str(exc))
 
 
 @app.command()
@@ -135,9 +171,56 @@ def eval_() -> None:
 
 
 @app.command()
-def explain(message_id: Annotated[str, typer.Argument(help="Identifiant Gmail du mail.")]) -> None:
-    """Affiche le texte nettoyé et la probabilité de chaque label pour un mail."""
-    _not_implemented("étape 7")
+def explain(
+    message_id: Annotated[
+        str, typer.Argument(help="Identifiant Gmail du mail (voir `mailsort messages`).")
+    ],
+    text_only: Annotated[
+        bool, typer.Option("--text-only", help="N'appelle pas Jev : affiche seulement le texte.")
+    ] = False,
+    config: ConfigPath = Path("labels.yaml"),
+) -> None:
+    """Affiche ce que Jev reçoit pour un mail Gmail, puis ses probabilités et les labels décidés.
+    Ne modifie rien dans Gmail."""
+    cfg = _load_config(config)
+    box = _connect_gmail()
+    try:
+        message = box.get_message(message_id)
+        thread = box.thread_info(message.thread_id)
+        addresses = [box.profile_email(), *_user_addresses()]
+    except gmail.GmailError as exc:
+        _fail(str(exc))
+
+    summary = summarize(
+        message.headers,
+        message.plain,
+        message.html,
+        message.attachments,
+        user_addresses=addresses,
+        user_replied=thread.user_replied,
+    )
+    if gmail.is_excluded(message):
+        excluded = sorted(message.label_ids & gmail.EXCLUDED_LABELS)
+        typer.echo(f"⚠ Ce mail serait ignoré par le tri ({', '.join(excluded)}).")
+    state = summary.to_state()
+    for key, value in state.items():
+        if key != "body":
+            typer.echo(f"{key} : {value}")
+    typer.echo(
+        f"Dernier message du fil envoyé par toi : {'oui' if thread.last_from_user else 'non'}"
+    )
+    typer.echo("─" * 60)
+    typer.echo(summary.body.text)
+    typer.echo("─" * 60)
+    if text_only:
+        return
+
+    try:
+        with jev.JevClient.from_env() as client:
+            result = jev.classify(client, cfg, state, user_replied_last=thread.last_from_user)
+    except jev.JevError as exc:
+        _fail(str(exc))
+    _print_classification(cfg, summary, result)
 
 
 @app.command()
@@ -176,7 +259,10 @@ def classify(eml: EmlPath, config: ConfigPath = Path("labels.yaml")) -> None:
             result = jev.classify(client, cfg, summary.to_state())
     except jev.JevError as exc:
         _fail(str(exc))
+    _print_classification(cfg, summary, result)
 
+
+def _print_classification(cfg: Config, summary: MailSummary, result: jev.Classification) -> None:
     by_id = cfg.by_id
     decision = result.decision
     mark = {True: "✔", False: " "}
