@@ -31,10 +31,19 @@ Dans la [console Google Cloud](https://console.cloud.google.com/) :
 2. **Activer l'API Gmail** : APIs & Services → Library → « Gmail API » → Enable.
 3. **Écran de consentement** : Google Auth Platform → Get started. Nom de l'app « mailsort »,
    ton adresse comme e-mail d'assistance et de contact, audience **External**.
-4. **Passer l'app en production** : Google Auth Platform → Audience → **Publish app**, puis
+4. **Compléter Branding** (sinon « Publish app » reste grisé avec le message « complete your
+   configuration on the Branding page ») : Google Auth Platform → Branding.
+   - Application home page : `https://alexisbaud.github.io/mailsort/`
+   - Application privacy policy link : `https://alexisbaud.github.io/mailsort/privacy.html`
+   - Authorized domains : `alexisbaud.github.io`
+
+   Ces deux pages sont dans [`docs/`](docs/), publiées par GitHub Pages depuis la branche
+   `main`. Aucune vérification Google n'est faite sur ces liens : il faut seulement qu'ils
+   existent.
+5. **Passer l'app en production** : Google Auth Platform → Audience → **Publish app**, puis
    confirmer. En statut « Testing », le jeton expirerait au bout de 7 jours. Aucune
    vérification Google n'est nécessaire pour un usage personnel.
-5. **Créer le client OAuth** : Google Auth Platform → Clients → Create client → type
+6. **Créer le client OAuth** : Google Auth Platform → Clients → Create client → type
    **Desktop app** → Create → **Download JSON**. Enregistrer le fichier à la racine du projet
    sous le nom `credentials.json` (modèle : `credentials.json.example`).
 
