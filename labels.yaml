@@ -1,0 +1,211 @@
+# Configuration des labels de mailsort.
+#
+# - `id` est le lien permanent entre ce fichier, la base et le label Gmail : ne jamais le changer.
+# - Changer `name` ou `description` repose la question à Jev sur tous les mails
+#   (pour un type, tout le choix de type est reposé).
+# - Changer un seuil, `enabled`, `never_with` ou `protects_from` recalcule seulement les règles.
+# - `color` et la visibilité ne sont appliquées qu'à la création du label Gmail.
+# - Valider le fichier après modification : `uv run mailsort labels check`.
+
+settings:
+  types:
+    primary_min: 0.60        # seuil du type principal
+    secondary_trigger: 0.30  # déclenche le second passage
+    secondary_min: 0.70      # seuil du type secondaire
+    none_description: >
+      None of the other types applies. This email is not a proof of payment
+      or refund, not the tracking of a shipment, return or download, not a
+      ticket or booking, not an official or contractual document, not an
+      account or security notification, not a newsletter, digest or
+      changelog, and not a promotional or marketing message.
+  yes_no_min: 0.80           # seuil par défaut des questions oui/non
+  doubt_min: 0.50            # en dessous : non ; entre les deux : To Review
+  parents:                   # label parent Gmail de chaque famille
+    type: Types
+    domain: Domains
+    action: Actions
+    cleanup: Actions
+    system: Actions
+  visibility:                # appliquée seulement à la création du label
+    type:    {label_list: show,           message_list: show}
+    domain:  {label_list: show_if_unread, message_list: show}
+    action:  {label_list: show,           message_list: hide}
+    cleanup: {label_list: show,           message_list: hide}
+    system:  {label_list: show_if_unread, message_list: hide}
+
+labels:
+  # ---------------------------------------------------------------- Types
+  - id: payments
+    name: "💳 Payments"
+    family: type
+    color: "#17a765"
+    never_with: [deliveries]
+    protects_from: [deletable]
+    description: >
+      Proof that the user paid for something or was refunded: invoices,
+      receipts, paid order confirmations (including free orders), payment
+      confirmations, rent receipts, charged subscription renewals, refunds.
+      Not: payment reminders before paying, failed payments, quotes, price
+      change announcements, money received by the user.
+
+  - id: deliveries
+    name: "📦 Deliveries"
+    family: type
+    color: "#ff7537"
+    description: >
+      Tracking of something the user ordered or obtained until it reaches
+      them: shipping, tracking, delivery, pickup points, returns and
+      exchanges, a device sent for repair, a file or resource made available
+      for download, even if free.
+
+  - id: tickets_bookings
+    name: "🎟️ Tickets & Bookings"
+    family: type
+    color: "#7858c2"
+    protects_from: [deletable]
+    description: >
+      An access ticket or reservation tied to a date or place: transport
+      tickets, show or event tickets, boarding passes, accommodation,
+      restaurant or appointment bookings, event registrations, and changes or
+      cancellations to them.
+
+  - id: official_documents
+    name: "📄 Official Documents"
+    family: type
+    color: "#1e53b8"
+    protects_from: [deletable]
+    description: >
+      A document with administrative, contractual or legal value worth
+      keeping: contracts, certificates, attestations, payslips, tax notices,
+      official statements, summons, electronically signed documents.
+
+  - id: accounts_security
+    name: "🔐 Accounts & Security"
+    family: type
+    color: "#757575"
+    description: >
+      Management of one of the user's online accounts: account creation,
+      email verification, login or verification codes, password resets,
+      sign-in or new device alerts, two-factor authentication, account detail
+      changes, updates to terms of use or privacy policies.
+
+  - id: newsletters
+    name: "📰 Newsletters & Digests"
+    family: type
+    color: "#007286"
+    never_with: [marketing]
+    description: >
+      Informational content sent regularly by subscription: newsletters,
+      digests, summaries, release notes, changelogs, announcements of new
+      features in a product the user uses, activity recaps. Not: messages
+      whose main goal is to sell.
+
+  - id: marketing
+    name: "📣 Marketing"
+    family: type
+    color: "#c2175b"
+    description: >
+      A commercial message trying to make the user buy, consume or come back:
+      promotions, sales, discount codes, offers, new products, abandoned
+      carts, recommendations, referral programs, review requests, satisfaction
+      surveys.
+
+  # -------------------------------------------------------------- Domains
+  - id: housing
+    name: "🏠 Housing"
+    family: domain
+    color: "#ffc8af"
+    description: >
+      The user's home: renting, rent, landlord or agency, flatsharing, service
+      charges, energy, water, internet access, home insurance, repairs,
+      moving, housing benefits.
+
+  - id: administration
+    name: "🏛️ Administration"
+    family: domain
+    color: "#ebdbde"
+    description: >
+      Formalities with public administrations and public bodies: taxes,
+      identity documents, civil status, social security, benefits, vehicles,
+      fines, justice.
+
+  - id: health
+    name: "🩺 Health"
+    family: domain
+    color: "#fcd2e0"
+    description: >
+      The user's physical and mental health: medical appointments,
+      prescriptions, test results, healthcare reimbursements, health
+      insurance, pharmacy.
+
+  - id: banking
+    name: "🏦 Banking & Investments"
+    family: domain
+    color: "#b4efd3"
+    description: >
+      The user's money: bank accounts, cards, transfers, direct debits, bank
+      fees, savings, investments, loans, cryptocurrencies.
+
+  - id: work
+    name: "💼 Work"
+    family: domain
+    color: "#b6cff5"
+    description: >
+      The user's professional life, as an employee or self-employed: employer,
+      colleagues, recruiting, job applications, employment contracts, payroll,
+      work tools, clients, prospects, quotes and invoices sent by the user,
+      freelance activity and status, professional network.
+
+  - id: studies
+    name: "🎓 Studies & Training"
+    family: domain
+    color: "#e3d7ff"
+    description: >
+      Learning: school, university, the school side of a work-study program,
+      courses, exams, diplomas, online training, certifications, alumni.
+
+  - id: travels
+    name: "✈️ Travels"
+    family: domain
+    color: "#99d7e4"
+    description: >
+      Trips outside daily life: long-distance transport, accommodation, stays,
+      visas and travel formalities, tax-free shopping refunds, car rental,
+      travel insurance, activities at the destination.
+
+  - id: family_friends
+    name: "👨‍👩‍👧 Family & Friends"
+    family: domain
+    color: "#fbe983"
+    protects_from: [deletable]
+    description: >
+      Personal exchanges with family, friends, a partner or acquaintances:
+      messages written by someone close to the user, emails forwarded by them,
+      personal invitations, group money pots between friends.
+
+  # ------------------------------------------------------ Actions & cleanup
+  - id: to_reply
+    name: "✉️ To Reply"
+    family: action
+    color: "#b1b1b1"
+    protects_from: [deletable]
+    description: >
+      A message that expects an answer or a specific action from the user: a
+      person asking a question, making a request or waiting for a
+      confirmation, or an organization asking for a document or an action
+      before a deadline. Not: automatic notifications that require nothing.
+
+  - id: deletable
+    name: "🗑️ Deletable"
+    family: cleanup
+    color: "#d93025"
+    description: >
+      A message with no value once read or once its date has passed:
+      advertising, social network notifications, generic reminders, expired
+      offers, mailing list subscription confirmations, surveys.
+
+  # --------------------------------------------------------------- System
+  - id: to_review
+    name: "🤔 To Review"
+    family: system
+    color: "#ffae47"

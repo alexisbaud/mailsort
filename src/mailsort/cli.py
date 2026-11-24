@@ -3,11 +3,24 @@
 Les commandes sont encore vides : chacune sera branchée à l'étape du plan indiquée.
 """
 
+from collections import Counter
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from mailsort import __version__
+from mailsort.config import FAMILIES, ConfigError, load_config
+
+ConfigPath = Annotated[
+    Path,
+    typer.Option(
+        "--config",
+        envvar="MAILSORT_LABELS",
+        help="Chemin de labels.yaml.",
+        show_default=True,
+    ),
+]
 
 app = typer.Typer(
     help="Tri automatique des e-mails Gmail par Jev.",
@@ -83,6 +96,23 @@ def explain(message_id: Annotated[str, typer.Argument(help="Identifiant Gmail du
 def corrections() -> None:
     """Liste les corrections manuelles par label."""
     _not_implemented("étape 10")
+
+
+@labels_app.command("check")
+def labels_check(config: ConfigPath = Path("labels.yaml")) -> None:
+    """Valide labels.yaml sans rien toucher, et résume son contenu."""
+    try:
+        cfg = load_config(config)
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    counts = Counter(label.family for label in cfg.labels)
+    summary = ", ".join(f"{counts[f]} {f}" for f in FAMILIES if counts[f])
+    disabled = [label.id for label in cfg.labels if not label.enabled]
+    typer.echo(f"{config} valide : {len(cfg.labels)} labels ({summary}).")
+    if disabled:
+        typer.echo(f"Désactivés : {', '.join(disabled)}.")
 
 
 @labels_app.command("delete")

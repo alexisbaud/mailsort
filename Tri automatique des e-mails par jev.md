@@ -33,7 +33,9 @@ Tout le tri passe par Jev : les filtres Gmail actuels seront supprimés une fois
 Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou empêche deux passages de tourner en même temps.
 
 1. **Synchroniser les labels.** Le programme lit `labels.yaml`, crée les labels Gmail manquants, y compris les labels parents, et renomme ceux qui ont changé de nom. Il garde le lien entre chaque label du fichier et l'identifiant du label Gmail, donc un renommage conserve les mails déjà classés.
-2. **Repérer les changements de config.** Chaque label a une empreinte (nom, description, seuil, règles). Si une empreinte a changé depuis le dernier passage, le label est à re-évaluer sur tous les mails.
+2. **Repérer les changements de config.** Deux sortes d'empreintes sont comparées à celles du dernier passage :
+   - l'**empreinte de question** (nom et description) : si elle change, la question est reposée à Jev sur tous les mails. Les types forment une seule question, donc ils partagent une seule empreinte, qui couvre aussi la description de « None of the above » ;
+   - l'**empreinte des règles** (seuils, `enabled`, `never_with`, `protects_from`) : si elle change, les règles sont recalculées sur tous les mails à partir des probabilités enregistrées, sans appeler Jev.
 3. **Lister les mails à traiter.** Ce sont les messages jamais traités, plus tous les messages si un label est à re-évaluer. Le programme ignore les spams, la corbeille, les brouillons et les messages envoyés par Alexis.
 4. **Préparer chaque mail.** Il extrait l'expéditeur, les destinataires, l'objet, la date, les en-têtes de liste de diffusion, les noms des pièces jointes et le texte nettoyé et tronqué (voir la section sur les données envoyées).
 5. **Interroger Jev.** Un appel par mail : le mail est l'« état ». Les types forment une seule question à choix (les 7 types plus « None of the above ») ; chaque autre label est une question oui/non construite à partir de sa description. Jev renvoie une probabilité par option et par label. Un second appel, limité aux types, peut suivre pour chercher un type secondaire (section Règles de décision).
@@ -148,9 +150,11 @@ labels:
 | `protects_from` | Labels interdits quand celui-ci est posé |
 | `description` | Texte envoyé à Jev, en anglais et générique |
 
-**Ajouter un label** : ajouter une entrée avec un nouvel `id`. Au passage suivant, le programme crée le label Gmail et pose seulement cette question sur tous les mails.
+**Ajouter un label** : ajouter une entrée avec un nouvel `id`. Au passage suivant, le programme crée le label Gmail et pose seulement cette question sur tous les mails. Pour un nouveau type, c'est tout le choix de type qui est reposé.
 
-**Modifier un label** : changer sa description, son seuil ou ses règles. Son empreinte change, donc il est ré-évalué sur tous les mails, et les règles sont recalculées.
+**Modifier un label** : changer son nom ou sa description repose sa question à Jev sur tous les mails (pour un type, tout le choix de type). Changer son seuil ou ses règles recalcule seulement les règles, sans appeler Jev.
+
+**Vérifier le fichier** : `mailsort labels check` valide `labels.yaml` sans rien toucher et résume son contenu.
 
 **Supprimer un label** : retirer l'entrée. Le programme ne supprime pas le label Gmail tout seul : il l'indique dans le journal, et la commande `mailsort labels delete <id> --confirm` le supprime.
 
@@ -165,7 +169,7 @@ labels:
 
 La couleur de fond est le code hexadécimal de la colonne Couleur. Le programme choisit la couleur du texte : blanc sur un fond foncé, gris très foncé sur un fond clair. L'API Gmail n'accepte qu'une palette fixe : si un code n'en fait pas partie, le programme prend la valeur acceptée la plus proche et l'indique dans le journal.
 
-Au démarrage, le programme valide le fichier : `id` en double, famille inconnue, paire interdite ou protection qui vise un label inexistant, `never_with` posé sur un label qui n'est pas un type. En cas d'erreur, il s'arrête sans rien toucher.
+Au démarrage, le programme valide le fichier : `id` en double, famille inconnue, paire interdite ou protection qui vise un label inexistant, `never_with` posé sur un label ou visant un label qui n'est pas un type, champ inconnu (faute de frappe), couleur ou seuil invalide, `threshold` sur un label qui n'est pas oui/non ou inférieur à `doubt_min`, description manquante, nom Gmail en double ou contenant « / », label `to_review` absent. En cas d'erreur, il s'arrête sans rien toucher et liste toutes les erreurs d'un coup.
 
 ## Retri et corrections manuelles
 
@@ -250,6 +254,7 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | `mailsort eval` | Compare le classement aux labels existants |
 | `mailsort explain <id du mail>` | Affiche la probabilité de chaque label pour un mail |
 | `mailsort corrections` | Liste les corrections manuelles par label |
+| `mailsort labels check` | Valide `labels.yaml` sans rien toucher |
 | `mailsort labels delete <id> --confirm` | Supprime un label retiré du fichier |
 
 ## Questions ouvertes
