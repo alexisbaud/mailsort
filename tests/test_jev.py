@@ -305,3 +305,15 @@ def test_classify_with_secondary_pass():
 
 def test_cost():
     assert cost_usd(1_000_000) == pytest.approx(0.042)
+
+
+def test_payment_required_stops_like_an_auth_error():
+    from fake_jev import FakeJev
+
+    from mailsort.jev import JevAuthError, JevClient
+
+    fake = FakeJev(failures=[402])
+    client = JevClient("k", transport=fake.transport(), max_requests_per_second=0)
+    with pytest.raises(JevAuthError, match="crédit"):
+        client.system_one({"subject": "x"}, {"q": {"type": "noul", "instructions": "?"}})
+    assert len(fake.requests) == 1

@@ -72,3 +72,37 @@ Vérifier ensuite l'accès, en lecture seule :
 uv run mailsort messages --limit 5
 uv run mailsort explain <identifiant> --text-only
 ```
+
+## Trier pour de vrai
+
+```bash
+uv run mailsort run                     # toute la boîte : nouveaux mails, labels modifiés, corrections
+uv run mailsort run -q "newer_than:7d"  # un petit lot, pour tester
+uv run mailsort run --csv               # écrit aussi run-….csv : mails modifiés, labels ajoutés et retirés
+```
+
+Le premier passage crée les labels Gmail (`Types/…`, `Domains/…`, `Actions/…`) avec leur couleur
+et leur visibilité. Ensuite, chaque passage :
+
+- renomme dans Gmail un label renommé dans `labels.yaml` (les mails le gardent) ;
+- repère tes corrections : un label que tu retires d'un mail n'y est plus jamais reposé, un label
+  que tu ajoutes y reste (`uv run mailsort corrections` les liste) ;
+- retire ✉️ To Reply quand le dernier message du fil vient de toi ;
+- ne touche jamais à tes propres labels ni à un label qu'il n'a pas posé.
+
+Un seul passage tourne à la fois (verrou `mailsort.db.lock`). Le bilan et les erreurs vont dans
+`logs/mailsort.log` (identifiants de mails seulement, jamais leur contenu).
+
+**Limites de Gmail et pannes.** Le programme étale ses appels sous un budget d'unités de quota
+par minute (`GMAIL_QUOTA_UNITS_PER_MINUTE`, 6 000 par défaut). Si Gmail demande quand même de
+ralentir, renvoie une erreur serveur ou si le réseau coupe, l'appel est réessayé avec un délai
+croissant (jusqu'à environ 2 minutes). Un mail qui échoue quand même est repris au passage
+suivant. Le passage s'arrête (code de sortie 2) si le quota du jour est épuisé ou après 5 erreurs
+d'affilée, et immédiatement (code 1) si l'accès Gmail ou Jev est refusé.
+
+| Commande | Effet |
+| --- | --- |
+| `mailsort resort --all` | Repose toutes les questions à Jev, en gardant tes corrections |
+| `mailsort eval [--compare "Label Gmail=id"]` | Compare le classement à un label Gmail existant, sans rien modifier |
+| `mailsort corrections` | Liste tes corrections par label, avec la probabilité donnée par Jev |
+| `mailsort labels delete <id> --confirm` | Supprime de Gmail un label retiré de `labels.yaml` |

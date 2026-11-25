@@ -170,6 +170,12 @@ class JevClient:
                 if response.status_code == 200:
                     return _parse_response(response)
                 detail = _error_detail(response)
+                if response.status_code == 402:
+                    raise JevAuthError(
+                        "Jev refuse la requête (402) : crédit TypeSafe épuisé ou paiement requis. "
+                        "Vérifier le compte dans la console TypeSafe.",
+                        status=402,
+                    )
                 if response.status_code in _AUTH_STATUS:
                     raise JevAuthError(
                         f"Clé Jev refusée ({response.status_code}) : vérifier TYPESAFE_API_KEY "

@@ -27,10 +27,16 @@ def test_version():
     assert __version__ in result.output
 
 
-def test_stub_commands_fail_cleanly():
+def test_run_without_credentials_explains_what_to_do():
     result = runner.invoke(app, ["run"])
     assert result.exit_code == 1
-    assert "Pas encore implémenté" in result.output
+    assert "credentials.json.example" in result.output
+
+
+def test_resort_requires_all():
+    result = runner.invoke(app, ["resort"])
+    assert result.exit_code == 1
+    assert "--all" in result.output
 
 
 def test_dry_run_without_credentials_does_not_open_browser():
@@ -253,3 +259,200 @@ def test_dry_run_command(monkeypatch, tmp_path):
     assert quiet.exit_code == 0, quiet.output
     assert "Mails 🤔 To Review" not in quiet.output
     assert "Doutes et absence de repère" in quiet.output
+
+
+# ================================================================ vrai passage
+
+
+def _real_setup(monkeypatch, tmp_path, **service_kwargs):
+    import os
+    from pathlib import Path
+
+    from fake_gmail import gmail_message
+    from fake_jev import FakeJev
+
+    from mailsort import jev
+    from mailsort.config import TYPE_QUESTION
+
+    Path(os.environ["GOOGLE_TOKEN_FILE"]).write_text("{}")
+    service = _fake_box(
+        monkeypatch,
+        messages={
+            "m1": gmail_message("m1", "t1", Subject="Facture"),
+            "m2": gmail_message("m2", "t2", Subject="Rien"),
+        },
+        threads={
+            "t1": {"messages": [{"labelIds": ["INBOX"], "internalDate": "1"}]},
+            "t2": {"messages": [{"labelIds": ["INBOX"], "internalDate": "1"}]},
+        },
+        **service_kwargs,
+    )
+    fake = FakeJev(
+        by_subject={
+            "Facture": {
+                "choices": {TYPE_QUESTION: {"payments": 0.95, jev.NONE_CHOICE: 0.05}},
+                "nouls": {"banking": 0.9},
+            },
+            "Rien": {"choices": {TYPE_QUESTION: {jev.NONE_CHOICE: 1.0}}},
+        }
+    )
+    monkeypatch.setattr(
+        jev.JevClient,
+        "from_env",
+        classmethod(
+            lambda cls: cls(
+                "k", transport=fake.transport(), max_requests_per_second=0, sleep=lambda s: None
+            )
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    labels = Path(__file__).resolve().parent.parent / "labels.yaml"
+    return service, fake, ["--config", str(labels)]
+
+
+def _log_text():
+    import logging
+    import os
+    from pathlib import Path
+
+    for handler in logging.getLogger("mailsort").handlers:
+        handler.flush()
+    return (Path(os.environ["MAILSORT_LOG_DIR"]) / "mailsort.log").read_text(encoding="utf-8")
+
+
+def test_real_run_command(monkeypatch, tmp_path):
+    service, fake, config = _real_setup(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["run", "--csv", *config])
+    assert result.exit_code == 0, result.output
+    assert "Label créé : Types/💳 Payments" in result.output
+    assert "2 mails dans le périmètre, dont 2 à envoyer à Jev" in result.output
+    assert "2 mails triés · 2 nouveaux · 2 modifiés" in result.output
+    assert service.names_on("m1") == {"Types/💳 Payments", "Domains/🏦 Banking & Investments"}
+    assert service.names_on("m2") == {"Actions/🤔 To Review"}
+    (csv_file,) = tmp_path.glob("run-*.csv")
+    assert "Facture" in csv_file.read_text(encoding="utf-8")
+
+    log = _log_text()
+    assert "Bilan : 2 mails dans le périmètre, 2 triés (2 nouveaux)" in log
+    assert "Facture" not in log  # le journal ne contient jamais le contenu des mails
+
+    again = runner.invoke(app, ["run", *config])
+    assert again.exit_code == 0, again.output
+    assert "0 nouveaux · 0 modifiés" in again.output
+    assert "dont 0 à envoyer à Jev" in again.output
+
+
+def test_real_run_refused_while_another_is_running(monkeypatch, tmp_path):
+    import os
+    from pathlib import Path
+
+    from mailsort.runtime import run_lock
+
+    _, _, config = _real_setup(monkeypatch, tmp_path)
+    with run_lock(Path(os.environ["MAILSORT_DB"])):
+        result = runner.invoke(app, ["run", *config])
+    assert result.exit_code == 1
+    assert "déjà en cours" in result.output
+
+
+def test_real_run_auth_error_is_logged(monkeypatch, tmp_path):
+    from fake_gmail import http_error
+
+    _, _, config = _real_setup(
+        monkeypatch, tmp_path, flaky={"labels.list": [http_error(401, "Invalid Credentials")]}
+    )
+    result = runner.invoke(app, ["run", *config])
+    assert result.exit_code == 1
+    assert "mailsort auth" in result.output
+    assert "ERROR Accès Gmail refusé" in _log_text()
+
+
+def test_real_run_quota_exhausted_exits_2(monkeypatch, tmp_path):
+    from fake_gmail import http_error
+
+    _, _, config = _real_setup(
+        monkeypatch,
+        tmp_path,
+        flaky={"messages.get": [http_error(403, "per day", reason="dailyLimitExceeded")]},
+    )
+    result = runner.invoke(app, ["run", *config])
+    assert result.exit_code == 2
+    assert "Quota journalier" in result.output
+
+
+def test_resort_all_reasks_everything_but_keeps_corrections(monkeypatch, tmp_path):
+    service, fake, config = _real_setup(monkeypatch, tmp_path)
+    assert runner.invoke(app, ["run", *config]).exit_code == 0
+    service.set_labels("m1", "Types/💳 Payments")  # retire 🏦 Banking à la main
+    fake.requests.clear()
+    result = runner.invoke(app, ["resort", "--all", *config])
+    assert result.exit_code == 0, result.output
+    assert len(fake.requests) == 2
+    assert service.names_on("m1") == {"Types/💳 Payments"}
+    assert "1 corrections manuelles" in result.output
+
+
+def test_corrections_command(monkeypatch, tmp_path):
+    service, _, config = _real_setup(monkeypatch, tmp_path)
+    assert runner.invoke(app, ["corrections", *config]).output.startswith("Aucune")
+    runner.invoke(app, ["run", *config])
+    service.set_labels("m1", "Types/💳 Payments")
+    runner.invoke(app, ["run", *config])
+    result = runner.invoke(app, ["corrections", *config])
+    assert result.exit_code == 0, result.output
+    assert "🏦 Banking & Investments : 1 correction(s), 0 ajout(s), 1 retrait(s)" in result.output
+    assert "retiré  Jev 0.90" in result.output
+    assert "Facture" in result.output
+
+
+def test_labels_delete_command(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    import yaml
+
+    service, _, config = _real_setup(monkeypatch, tmp_path)
+    runner.invoke(app, ["run", *config])
+    still = runner.invoke(app, ["labels", "delete", "banking", *config])
+    assert still.exit_code == 1
+    assert "encore dans labels.yaml" in still.output
+
+    raw = yaml.safe_load(Path(config[1]).read_text(encoding="utf-8"))
+    raw["labels"] = [lb for lb in raw["labels"] if lb["id"] != "banking"]
+    trimmed = tmp_path / "labels.yaml"
+    trimmed.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    dry = runner.invoke(app, ["labels", "delete", "banking", "--config", str(trimmed)])
+    assert dry.exit_code == 1
+    assert "--confirm" in dry.output
+    assert "Domains/🏦 Banking & Investments" in service.user_labels.values()
+
+    done = runner.invoke(
+        app, ["labels", "delete", "banking", "--confirm", "--config", str(trimmed)]
+    )
+    assert done.exit_code == 0, done.output
+    assert "Domains/🏦 Banking & Investments" not in service.user_labels.values()
+    assert service.names_on("m1") == {"Types/💳 Payments"}
+    assert "m1" in service.messages_by_id  # le mail reste
+
+
+def test_eval_command(monkeypatch, tmp_path):
+    service, fake, config = _real_setup(monkeypatch, tmp_path, labels={"L_pay": "💳 Paiements"})
+    for message_id in ("m1", "m2"):  # référence posée sur « Facture » et sur « Rien »
+        service.messages_by_id[message_id]["labelIds"].append("L_pay")
+    result = runner.invoke(app, ["eval", *config])
+    assert result.exit_code == 0, result.output
+    assert "« 💳 Paiements » face à 💳 Payments" in result.output
+    assert "Label introuvable dans Gmail" in result.output  # 📦 Réceptions
+    # « Facture » : accord ; « Rien » : oubli de Jev.
+    assert "2 mails de référence, 2 mails comparés · accord 50.0 % · rappel 50.0 % · " in (
+        result.output
+    )
+    assert "précision 100.0 %" in result.output
+    assert "Référence sans 💳 Payments (oubli) : 1" in result.output
+    assert service.count("messages.modify") == 0
+
+
+def test_eval_rejects_bad_pair(monkeypatch, tmp_path):
+    _, _, config = _real_setup(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["eval", "--compare", "Paiements=inconnu", *config])
+    assert result.exit_code == 1
+    assert "label inconnu" in result.output

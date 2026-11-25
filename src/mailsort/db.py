@@ -24,7 +24,7 @@ from typing import Literal
 
 from mailsort.config import SECONDARY_TYPE_QUESTION, TYPE_QUESTION
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -109,6 +109,12 @@ _MIGRATIONS: dict[int, str] = {
         value TEXT NOT NULL
     );
     """,
+    2: """
+    -- 1 entre l'enregistrement des labels voulus et la fin de leur écriture dans Gmail : si le
+    -- passage s'interrompt entre les deux, le suivant sait que l'écart entre la base et Gmail
+    -- vient de lui, et non d'une correction manuelle.
+    ALTER TABLE messages ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0;
+    """,
 }
 
 Status = Literal["pending", "done", "error"]
@@ -130,6 +136,7 @@ class MessageRecord:
     rules_fingerprint: str | None
     review_reasons: tuple[str, ...]
     last_error: str | None
+    sync_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -246,9 +253,21 @@ class Database:
         self._conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
 
     def mark_error(self, message_id: str, error: str) -> None:
+        """Note une erreur. Un mail déjà classé le reste (ses labels sont toujours valables) :
+        seul un mail jamais classé passe en statut « error »."""
         self._conn.execute(
-            "UPDATE messages SET status = 'error', last_error = ? WHERE id = ?",
+            "UPDATE messages SET status = CASE WHEN status = 'done' THEN 'done' ELSE 'error' END,"
+            " last_error = ? WHERE id = ?",
             (error, message_id),
+        )
+
+    def messages(self) -> dict[str, MessageRecord]:
+        """Tous les messages connus, par identifiant."""
+        return {row["id"]: _message(row) for row in self._conn.execute("SELECT * FROM messages")}
+
+    def set_sync_pending(self, message_id: str, pending: bool) -> None:
+        self._conn.execute(
+            "UPDATE messages SET sync_pending = ? WHERE id = ?", (int(pending), message_id)
         )
 
     # ------------------------------------------------------------ réponses de Jev
@@ -334,6 +353,28 @@ class Database:
         if cursor.rowcount != 1:
             raise KeyError(f"message inconnu : {message_id}")
 
+    def save_applied(self, message_id: str, labels: Iterable[str]) -> None:
+        """Remplace les labels posés par le programme, sans toucher au reste du message."""
+        now = _now()
+        labels = set(labels)
+        current = self.applied_labels(message_id)
+        for label_id in current - labels:
+            self._conn.execute(
+                "DELETE FROM applied_labels WHERE message_id = ? AND label_id = ?",
+                (message_id, label_id),
+            )
+        self._conn.executemany(
+            "INSERT INTO applied_labels (message_id, label_id, applied_at) VALUES (?, ?, ?)",
+            [(message_id, label_id, now) for label_id in sorted(labels - current)],
+        )
+
+    def all_applied_labels(self) -> dict[str, set[str]]:
+        """Labels posés par le programme, pour chaque message qui en a."""
+        result: dict[str, set[str]] = {}
+        for row in self._conn.execute("SELECT message_id, label_id FROM applied_labels"):
+            result.setdefault(row[0], set()).add(row[1])
+        return result
+
     def applied_labels(self, message_id: str) -> set[str]:
         rows = self._conn.execute(
             "SELECT label_id FROM applied_labels WHERE message_id = ?", (message_id,)
@@ -373,6 +414,12 @@ class Database:
             " present = excluded.present, locked_at = excluded.locked_at",
             (message_id, label_id, int(present), _now()),
         )
+
+    def all_locks(self) -> dict[str, dict[str, bool]]:
+        result: dict[str, dict[str, bool]] = {}
+        for row in self._conn.execute("SELECT message_id, label_id, present FROM locks"):
+            result.setdefault(row[0], {})[row[1]] = bool(row[2])
+        return result
 
     def locks(self, message_id: str) -> dict[str, bool]:
         rows = self._conn.execute(
@@ -421,6 +468,12 @@ class Database:
 
     def delete_gmail_label(self, key: str) -> None:
         self._conn.execute("DELETE FROM gmail_labels WHERE key = ?", (key,))
+
+    def forget_label(self, label_id: str) -> None:
+        """Le label a disparu de Gmail : plus aucun mail ne le porte. On oublie qu'il était posé
+        et les verrous qui le concernent (l'historique des corrections est gardé)."""
+        self._conn.execute("DELETE FROM applied_labels WHERE label_id = ?", (label_id,))
+        self._conn.execute("DELETE FROM locks WHERE label_id = ?", (label_id,))
 
     # ------------------------------------------------------------ passages et état
 

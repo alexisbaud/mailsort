@@ -32,7 +32,7 @@ Tout le tri passe par Jev : les filtres Gmail actuels seront supprimés une fois
 
 ## Fonctionnement
 
-Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou empêche deux passages de tourner en même temps.
+Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou (fichier `mailsort.db.lock`, libéré même si le programme s'arrête brutalement) empêche deux passages de tourner en même temps : le second s'arrête aussitôt sans rien toucher.
 
 1. **Synchroniser les labels.** Le programme lit `labels.yaml`, crée les labels Gmail manquants, y compris les labels parents, et renomme ceux qui ont changé de nom. Il garde le lien entre chaque label du fichier et l'identifiant du label Gmail, donc un renommage conserve les mails déjà classés.
 2. **Repérer les changements de config.** Deux sortes d'empreintes sont comparées à celles du dernier passage :
@@ -42,11 +42,22 @@ Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou emp
 4. **Préparer chaque mail.** Il extrait l'expéditeur, les destinataires, l'objet, la date, les en-têtes de liste de diffusion, les noms des pièces jointes et le texte nettoyé et tronqué (voir la section sur les données envoyées).
 5. **Interroger Jev.** Un appel par mail : le mail est l'« état ». Les types forment une seule question à choix (question `choice` : les 9 types plus « None of the above ») ; chaque autre label est une question oui/non (question `noul`) construite à partir de sa description. Jev renvoie une probabilité par option et par label. Un second appel, limité aux types, peut suivre pour chercher un type secondaire (section Règles de décision).
 6. **Appliquer les règles.** Le code applique les seuils, les exclusions et les protections (section Règles de décision).
-7. **Mettre à jour Gmail.** Le programme ajoute les labels gagnés et retire ceux qu'il avait posés et qui ne s'appliquent plus. Il ne touche jamais un label qu'Alexis a corrigé à la main.
-8. **Enregistrer.** Une base SQLite garde, pour chaque message, les probabilités de chaque question avec son empreinte, les labels posés par le programme et l'empreinte des règles utilisée. Elle garde aussi les verrous, l'historique des corrections, le lien entre chaque label et son label Gmail, et le bilan des passages. Chaque message est enregistré d'un bloc (transaction) : un passage interrompu ne laisse pas de message à moitié traité. Le schéma est versionné, et une nouvelle version du programme met la base à jour au démarrage.
-9. **Faire le bilan.** Le passage écrit un journal : nombre de mails traités, nombre par label, nombre de 🤔 To Review, erreurs éventuelles. Aucune notification n'est envoyée.
+7. **Mettre à jour Gmail.** Le programme ajoute les labels gagnés et retire ceux qu'il avait posés et qui ne s'appliquent plus, en un seul appel par mail et seulement si quelque chose change : un passage sans nouveauté ne modifie rien. Il ne touche jamais un label qu'Alexis a corrigé à la main, ni un label qu'il n'a pas posé.
+8. **Enregistrer.** Une base SQLite garde, pour chaque message, les probabilités de chaque question avec son empreinte, les labels posés par le programme et l'empreinte des règles utilisée. Elle garde aussi les verrous, l'historique des corrections, le lien entre chaque label et son label Gmail, et le bilan des passages. Chaque message est enregistré d'un bloc (transaction) : un passage interrompu ne laisse pas de message à moitié traité. Entre l'enregistrement des labels voulus et leur écriture dans Gmail, le message est marqué « écriture en cours » : si le passage s'arrête entre les deux, le suivant sait que l'écart entre la base et Gmail vient de lui, et non d'une correction manuelle, et termine l'écriture. Le schéma est versionné (version 2), et une nouvelle version du programme met la base à jour au démarrage.
+9. **Faire le bilan.** Le passage écrit un journal (`logs/mailsort.log`, 5 fichiers de 1 Mo en rotation) : nombre de mails traités et nouveaux, labels ajoutés et retirés, nombre par label, nombre de 🤔 To Review, doutes, corrections manuelles repérées, erreurs éventuelles, coût Jev. Le journal ne contient que des identifiants de mails, jamais leur contenu. Le bilan est aussi enregistré dans la table `runs` de la base. Aucune notification n'est envoyée.
 
-**Erreurs d'accès.** Si Gmail refuse l'accès (jeton expiré ou révoqué, erreur `invalid_grant`) ou si Jev refuse la clé, le passage s'arrête sans rien modifier et écrit dans le journal une ligne `ERROR` explicite avec la cause et la marche à suivre, par exemple : « Accès Gmail refusé : jeton expiré ou révoqué. Lancer `mailsort auth` sur le Mac, puis copier `token.json` sur le VPS. » Chaque passage suivant réécrit cette ligne tant que l'accès n'est pas rétabli.
+**Erreurs d'accès.** Si Gmail refuse l'accès (jeton expiré ou révoqué, erreur `invalid_grant`) ou si Jev refuse la clé, le passage s'arrête sans rien modifier et écrit dans le journal une ligne `ERROR` explicite avec la cause et la marche à suivre, par exemple : « Accès Gmail refusé : jeton expiré ou révoqué. Lancer `mailsort auth` sur le Mac, puis copier `token.json` sur le VPS. » Chaque passage suivant réécrit cette ligne tant que l'accès n'est pas rétabli. Il en va de même si Jev répond 402 (crédit TypeSafe épuisé).
+
+**Limites de Gmail et pannes.** Chaque appel à l'API Gmail coûte des unités de quota (5 pour lire ou modifier un mail, 10 pour lire un fil, 1 pour lister les labels), et Gmail limite les unités par minute et par utilisateur (15 000). Le programme :
+
+- étale ses appels pour rester sous un budget (`GMAIL_QUOTA_UNITS_PER_MINUTE` dans `.env`, 6 000 par défaut, pour laisser de la marge au client Gmail lui-même), sans rafale de plus de 2 secondes de budget : Gmail lisse sa limite sur quelques secondes, et une centaine de lectures de fils d'affilée suffisait à se faire refuser (mesuré le 25 novembre 2026) ;
+- réessaie un appel refusé pour excès de débit (429, ou 403 avec une limite par minute), une erreur serveur (5xx) ou une coupure réseau : jusqu'à 8 tentatives, avec un délai qui double à chaque fois (1, 2, 4… 64 secondes, soit plus de 2 minutes au total), en suivant l'en-tête `Retry-After` s'il est fourni ;
+- donne à chaque requête un délai d'attente de 60 secondes : un réseau bloqué ne fige pas le passage ;
+- passe au mail suivant si un mail échoue malgré tout (il est repris au passage suivant), ignore sans erreur un mail supprimé entre la liste et sa lecture ;
+- s'arrête proprement, avec le code de sortie 2, si le quota du jour est épuisé ou après 5 erreurs d'affilée (Gmail ou Jev sans doute en panne) ; le passage suivant reprend là où celui-ci s'est arrêté ;
+- traite un arrêt demandé par le système (SIGTERM, redémarrage du serveur) comme une interruption : le mail en cours est abandonné, la base reste cohérente.
+
+Jev a ses propres nouvelles tentatives (section Coût estimé).
 
 Les labels Gmail s'appliquent message par message : dans la boîte, un fil affiche les labels de tous ses messages.
 
@@ -188,7 +199,7 @@ labels:
 | ✉️ To Reply et 🗑️ Deletable | Show | Hide |
 | 🤔 To Review | Show if unread | Hide |
 
-La couleur de fond est le code hexadécimal de la colonne Couleur. Le programme choisit la couleur du texte : blanc sur un fond foncé, gris très foncé sur un fond clair. L'API Gmail n'accepte qu'une palette fixe : si un code n'en fait pas partie, le programme prend la valeur acceptée la plus proche et l'indique dans le journal.
+La couleur de fond est le code hexadécimal de la colonne Couleur. Le programme choisit la couleur du texte : blanc sur un fond foncé, gris très foncé sur un fond clair. L'API Gmail n'accepte qu'une palette fixe : si un code n'en fait pas partie, le programme prend la valeur acceptée la plus proche à l'œil (distance dans l'espace de couleurs Lab) et l'indique dans le journal. Avec le fichier actuel, les 20 labels gardent 20 couleurs distinctes. Si Gmail refuse quand même la couleur, le label est créé sans couleur.
 
 Au démarrage, le programme valide le fichier : `id` en double, famille inconnue, paire interdite ou protection qui vise un label inexistant, `never_with` posé sur un label ou visant un label qui n'est pas un type, champ inconnu (faute de frappe), couleur ou seuil invalide, `threshold` sur un label qui n'est pas oui/non ou inférieur à `doubt_min`, seuil de famille inférieur à `doubt_min` ou sur une famille qui n'est pas oui/non, `primary_pair_sum` inférieur à `primary_min`, nom d'utilisateur vide, description manquante, nom Gmail en double ou contenant « / », label `to_review` absent. En cas d'erreur, il s'arrête sans rien toucher et liste toutes les erreurs d'un coup.
 
@@ -200,11 +211,13 @@ Un changement de label déclenche le retri de toute la boîte, mais seules les q
 
 **Nouvelle version de Jev** : la version est épinglée dans `.env` (`JEV_MODEL`). L'empreinte enregistrée pour chaque réponse inclut cette version, celle des consignes envoyées à Jev et le nom de l'utilisateur : changer `JEV_MODEL` fait donc reposer toutes les questions au passage suivant, sans commande à lancer.
 
-**Corrections manuelles** : à chaque passage, le programme compare les labels présents dans Gmail avec ceux qu'il a posés la dernière fois.
+**Corrections manuelles** : à chaque passage, le programme liste les mails qui portent chacun de ses labels (quelques appels pour toute la boîte), et compare avec ceux qu'il a posés la dernière fois.
 
 - Un label posé par le programme puis retiré par Alexis est verrouillé « absent » pour ce message.
 - Un label posé par Alexis et que le programme n'avait pas posé est verrouillé « présent ».
-- Un label verrouillé n'est plus jamais modifié sur ce message, même lors d'un retri complet.
+- Un label verrouillé n'est plus jamais modifié sur ce message, même lors d'un retri complet. Si Alexis change d'avis (il repose un label retiré, ou retire un label ajouté), le verrou suit sa dernière correction.
+- Un label du fichier déjà présent sur un mail que le programme n'a encore jamais traité compte comme posé par Alexis.
+- Un label supprimé dans Gmail est recréé au passage suivant, sans verrou : le programme le repose là où il s'applique.
 
 Les corrections sont enregistrées avec le mail et les probabilités de Jev. La commande `mailsort corrections` les liste par label : c'est la matière pour améliorer une description avec Claude Code.
 
@@ -265,25 +278,25 @@ Trier 1 000 mails coûte environ 0,10 à 0,13 $ (au pire 0,30 $ avec beaucoup de
 Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis remplace les filtres actuels.
 
 1. **Test à blanc.** `mailsort run --dry-run` lit les vrais mails, interroge Jev et applique les règles, sans rien modifier dans Gmail : aucun label n'est créé, posé ou retiré. Il affiche le nombre de mails par label, le nombre de mails sans aucun label, ceux dont le seul label serait 🤔 To Review, et le total trié. Avant ce bilan, il liste chaque mail qui irait dans 🤔 To Review (donc sans repère) : identifiant, date, expéditeur, objet, autres labels, ses doutes avec leurs scores (type incertain : les trois meilleurs types et les seuils ; doute : le score et le seuil du label) et les repères les plus proches (meilleur type, trois domaines ou nettoyages les mieux notés). Après le bilan, il compte les mails par doute et par absence de repère, avec le nombre de ceux qui partent en 🤔 To Review. `--no-review` masque la liste. Il écrit aussi un CSV : mail, probabilités, labels qui seraient posés, doutes et absence de repère (`review_reasons`), et `to_review` (`yes` ou `no`) qui dit si le mail part réellement en 🤔 To Review. Par défaut il traite les 200 mails les plus récents ; `--limit N`, `--all` et `--query` changent le périmètre. Au-delà de 500 mails à envoyer à Jev, il affiche le coût estimé et demande confirmation. Les réponses de Jev sont enregistrées dans la base (pas les décisions) : relancer le test après un changement de seuil ne coûte rien, et seules les questions modifiées sont reposées. Si aucun jeton Gmail n'existe encore, il ouvre le navigateur pour l'autorisation.
-2. **Mesure de qualité.** `mailsort eval` compare le résultat aux labels actuels « 💳 Paiements » (≈ 90 fils) et « 📦 Réceptions » (≈ 45 fils), classés à la main et par filtres. Il affiche les mails où Jev n'est pas d'accord, pour ajuster descriptions et seuils.
-3. **Reprise des labels existants.** Le programme renomme « 💳 Paiements » en « Types/💳 Payments » et « 📦 Réceptions » en « Types/📦 Deliveries », en gardant leurs mails. Ces labels existants ne comptent pas comme des corrections manuelles.
-4. **Premier passage réel.** Il classe toute la boîte, puis produit un rapport des labels ajoutés et retirés.
+2. **Mesure de qualité.** `mailsort eval` compare le résultat aux labels « 💳 Paiements » et « 📦 Réceptions », classés à la main et par filtres, ou à toute autre paire passée par `--compare "Nom du label Gmail=id"`. Il classe les mails de référence (réponses reprises si elles existent), puis affiche l'accord, le rappel, la précision et les mails où Jev n'est pas d'accord, pour ajuster descriptions et seuils. Rien n'est modifié dans Gmail. Au 25 novembre 2026, ces deux labels n'existent plus dans la boîte : il n'y a rien à comparer, et les corrections manuelles (`mailsort corrections`) prennent le relais.
+3. **Reprise des labels existants.** Un label Gmail qui porte déjà le nom complet d'un label du fichier (par exemple « Types/💳 Payments ») est repris au lieu d'être recréé. Les anciens labels « 💳 Paiements » et « 📦 Réceptions » n'existant plus, il n'y a rien d'autre à reprendre.
+4. **Premier passage réel.** D'abord sur un petit lot (`mailsort run -q "newer_than:7d"`), puis sur toute la boîte (`mailsort run --csv`) : le bilan donne les labels ajoutés et retirés, le CSV le détail par mail.
 5. **Bascule.** Alexis supprime les 3 filtres Gmail (Settings → See all settings → Filters and Blocked Addresses), puis le cron est activé.
 
 | Commande | Effet |
 | --- | --- |
 | `mailsort auth` | Connexion à Gmail dans le navigateur ; crée ou remplace `token.json` (à lancer sur le Mac) |
-| `mailsort run` | Passage normal : nouveaux mails et labels modifiés |
+| `mailsort run [--limit N] [--query …] [--csv] [--yes]` | Passage normal : nouveaux mails, labels modifiés, corrections manuelles, règle « déjà répondu » ; `--csv` écrit le détail des mails modifiés. Code de sortie 0, 1 (erreur d'accès), 2 (arrêté avant la fin) |
 | `mailsort run --dry-run [--limit N \| --all] [--query …] [--no-review]` | Classe sans rien modifier dans Gmail : mails 🤔 To Review avec doutes et scores, bilan par label, sans label et total, décompte des doutes, plus un CSV |
-| `mailsort resort --all` | Repose toutes les questions sur tous les mails |
-| `mailsort eval` | Compare le classement aux labels existants |
+| `mailsort resort --all` | Repose toutes les questions sur tous les mails, en gardant les verrous |
+| `mailsort eval [--compare "Label Gmail=id"]` | Compare le classement aux labels existants, sans rien modifier |
 | `mailsort messages [--query …] [--limit N]` | Liste les derniers mails (identifiant, date, expéditeur, objet), en lecture seule |
 | `mailsort explain <id du mail>` | Affiche ce que Jev reçoit pour un mail, ses probabilités et les labels décidés, sans modifier Gmail ; `--text-only` n'appelle pas Jev |
 | `mailsort clean <fichier.eml>` | Affiche le texte nettoyé d'un mail téléchargé, sans réseau |
 | `mailsort classify <fichier.eml>` | Classe un mail téléchargé avec Jev et affiche probabilités, labels et coût, sans toucher Gmail |
-| `mailsort corrections` | Liste les corrections manuelles par label |
+| `mailsort corrections [--show N]` | Liste les corrections manuelles par label, avec la probabilité de Jev |
 | `mailsort labels check` | Valide `labels.yaml` sans rien toucher |
-| `mailsort labels delete <id> --confirm` | Supprime un label retiré du fichier |
+| `mailsort labels delete <id> --confirm` | Supprime de Gmail un label retiré du fichier (les mails restent) |
 
 ## Questions ouvertes
 

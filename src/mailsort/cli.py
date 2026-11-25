@@ -1,10 +1,12 @@
-"""Interface en ligne de commande de mailsort.
+"""Interface en ligne de commande de mailsort."""
 
-Les commandes sont encore vides : chacune sera branchée à l'étape du plan indiquée.
-"""
-
+import logging
 import os
+import sys
 from collections import Counter
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -29,17 +31,25 @@ from mailsort.config import (
 )
 from mailsort.db import Database
 from mailsort.engine import NONE_OPTION
+from mailsort.evaluate import DEFAULT_PAIRS, Evaluation, parse_pair
+from mailsort.labelsync import PARENT_KEY, LabelSyncError
 from mailsort.prepare import MailSummary, summarize, summarize_message
+from mailsort.runtime import AlreadyRunning, run_lock, setup_logging, stop_on_sigterm
 from mailsort.sorter import (
     TOKENS_PER_MAIL_ESTIMATE,
     DryRun,
     DryRunReport,
     Row,
+    Runner,
+    RunReport,
     default_csv_path,
     mail_notes,
     note_title,
     notes_summary,
+    write_rows_csv,
 )
+
+log = logging.getLogger("mailsort")
 
 ConfigPath = Annotated[
     Path,
@@ -60,14 +70,51 @@ labels_app = typer.Typer(help="Gestion des labels Gmail.", no_args_is_help=True)
 app.add_typer(labels_app, name="labels")
 
 
-def _not_implemented(step: str) -> None:
-    typer.echo(f"Pas encore implémenté ({step}).", err=True)
-    raise typer.Exit(code=1)
-
-
-def _fail(message: str) -> None:
+def _fail(message: str, *, code: int = 1) -> None:
     typer.echo(message, err=True)
-    raise typer.Exit(code=1)
+    raise typer.Exit(code=code)
+
+
+def _abort(message: str) -> None:
+    """Erreur qui arrête un passage : écrite dans le journal (ligne ERROR) puis affichée."""
+    log.error("%s", message)
+    _fail(message)
+
+
+def _db_path() -> Path:
+    return Path(os.environ.get("MAILSORT_DB") or "mailsort.db")
+
+
+def _interactive() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _confirm_cost(to_ask: int, yes: bool) -> None:
+    """Au-delà de CONFIRM_ABOVE mails à envoyer à Jev, demande confirmation (si quelqu'un est
+    là pour répondre : lancé par le cron, le passage continue)."""
+    if to_ask > CONFIRM_ABOVE and not yes and _interactive():
+        typer.confirm("Continuer ?", abort=True)
+
+
+@contextmanager
+def _progress(length: int, label: str) -> Iterator[Callable[[], None]]:
+    """Barre de progression dans un terminal ; rien quand le passage tourne sans terminal."""
+    if not _interactive() or length == 0:
+        yield lambda: None
+        return
+    with typer.progressbar(length=length, label=label, file=sys.stderr) as bar:
+        yield lambda: bar.update(1)
+
+
+def _jev_client() -> jev.JevClient:
+    try:
+        return jev.JevClient.from_env()
+    except jev.JevError as exc:
+        _abort(str(exc))
+        raise  # pour le typage : _abort lève toujours
 
 
 def _load_config(path: Path) -> Config:
@@ -129,16 +176,20 @@ def auth() -> None:
 
 def _connect_gmail(*, authorize_if_missing: bool = False) -> gmail.Gmail:
     """Connexion à Gmail. Avec `authorize_if_missing`, ouvre le navigateur pour l'autorisation
-    si aucun jeton n'existe encore (usage local, sur le Mac)."""
+    si aucun jeton n'existe encore (usage local, sur le Mac, jamais sans terminal)."""
     token = gmail.token_path()
     try:
-        if authorize_if_missing and not token.exists():
+        if authorize_if_missing and not token.exists() and _interactive():
             typer.echo("Aucun jeton Gmail : ouverture du navigateur pour autoriser l'accès…")
             gmail.run_auth_flow(gmail.client_secret_path(), token)
+        elif (
+            authorize_if_missing and not token.exists() and not gmail.client_secret_path().exists()
+        ):
+            gmail.run_auth_flow(gmail.client_secret_path(), token)  # message explicite
         return gmail.Gmail.connect(token)
     except gmail.GmailError as exc:
-        _fail(str(exc))
-        raise  # pour le typage : _fail lève toujours
+        _abort(str(exc))
+        raise  # pour le typage : _abort lève toujours
 
 
 @app.command()
@@ -162,7 +213,8 @@ def messages(
 
 
 CONFIRM_ABOVE = 500
-"""Au-delà de ce nombre de mails à envoyer à Jev, le passage à blanc demande confirmation."""
+"""Au-delà de ce nombre de mails à envoyer à Jev, le passage demande confirmation."""
+DRY_RUN_DEFAULT_LIMIT = 200
 
 
 @app.command()
@@ -176,8 +228,14 @@ def run(
         ),
     ] = False,
     limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Nombre de mails, du plus récent au plus ancien.")
-    ] = 200,
+        int | None,
+        typer.Option(
+            "--limit",
+            "-n",
+            help="Nombre de mails, du plus récent au plus ancien (passage à blanc : 200 par "
+            "défaut ; vrai passage : toute la boîte par défaut).",
+        ),
+    ] = None,
     all_: Annotated[bool, typer.Option("--all", help="Toute la boîte (ignore --limit).")] = False,
     query: Annotated[
         str, typer.Option("--query", "-q", help="Recherche Gmail pour restreindre les mails.")
@@ -190,38 +248,47 @@ def run(
             help="Passage à blanc : lister les mails 🤔 To Review avec leurs scores et la raison.",
         ),
     ] = True,
+    report_csv: Annotated[
+        bool,
+        typer.Option(
+            "--csv",
+            help="Vrai passage : écrire un CSV des mails modifiés (labels ajoutés, retirés).",
+        ),
+    ] = False,
     config: ConfigPath = Path("labels.yaml"),
 ) -> None:
-    """Passage de tri : nouveaux mails et labels modifiés."""
-    if not dry_run:
-        _not_implemented("étape 10 ; utiliser --dry-run pour un passage à blanc")
-
+    """Passage de tri : nouveaux mails, labels modifiés et corrections manuelles."""
     cfg = _load_config(config)
-    box = _connect_gmail(authorize_if_missing=True)
-    db_path = Path(os.environ.get("MAILSORT_DB") or "mailsort.db")
-    try:
-        client = jev.JevClient.from_env()
-    except jev.JevError as exc:
-        _fail(str(exc))
+    if dry_run:
+        _dry_run(cfg, query, None if all_ else (limit or DRY_RUN_DEFAULT_LIMIT), yes, review)
+        return
+    _real_run(cfg, query, None if all_ else limit, yes, force=False, report_csv=report_csv)
 
-    with client, Database.open(db_path) as db:
-        try:
-            dry = DryRun(box, client, db, cfg, user_addresses=_user_addresses())
-            typer.echo("Passage à blanc : rien n'est modifié dans Gmail.")
-            typer.echo("Liste des mails…")
-            messages = dry.list_messages(query, None if all_ else limit)
-            to_ask = dry.uncached_count(messages)
-            estimate = jev.cost_usd(to_ask * TOKENS_PER_MAIL_ESTIMATE)
-            typer.echo(
-                f"{len(messages)} mails à classer, dont {to_ask} à envoyer à Jev "
-                f"(coût estimé ≈ {estimate:.2f} $)."
-            )
-            if to_ask > CONFIRM_ABOVE and not yes:
-                typer.confirm("Continuer ?", abort=True)
-            with typer.progressbar(length=len(messages), label="Classement") as bar:
-                report = dry.run(messages, progress=lambda: bar.update(1))
-        except (gmail.GmailError, jev.JevError) as exc:
-            _fail(str(exc))
+
+def _dry_run(cfg: Config, query: str, limit: int | None, yes: bool, review: bool) -> None:
+    box = _connect_gmail(authorize_if_missing=True)
+    client = _jev_client()
+    db_path = _db_path()
+    try:
+        with run_lock(db_path), client, Database.open(db_path) as db:
+            try:
+                dry = DryRun(box, client, db, cfg, user_addresses=_user_addresses())
+                typer.echo("Passage à blanc : rien n'est modifié dans Gmail.")
+                typer.echo("Liste des mails…")
+                messages = dry.list_messages(query, limit)
+                to_ask = dry.uncached_count(messages)
+                estimate = jev.cost_usd(to_ask * TOKENS_PER_MAIL_ESTIMATE)
+                typer.echo(
+                    f"{len(messages)} mails à classer, dont {to_ask} à envoyer à Jev "
+                    f"(coût estimé ≈ {estimate:.2f} $)."
+                )
+                _confirm_cost(to_ask, yes)
+                with _progress(len(messages), "Classement") as advance:
+                    report = dry.run(messages, progress=advance)
+            except (gmail.GmailError, jev.JevError) as exc:
+                _fail(str(exc))
+    except AlreadyRunning as exc:
+        _fail(str(exc))
 
     csv_path = default_csv_path()
     dry.write_csv(csv_path)
@@ -230,6 +297,217 @@ def run(
     _print_dry_run(cfg, report)
     _print_notes_summary(cfg, dry.rows)
     typer.echo(f"\nDétail par mail : {csv_path}")
+
+
+def _real_run(
+    cfg: Config,
+    query: str,
+    limit: int | None,
+    yes: bool,
+    *,
+    force: bool,
+    report_csv: bool,
+) -> None:
+    """Vrai passage (ou retri forcé) : verrou, journal, labels posés dans Gmail, bilan."""
+    setup_logging()
+    mode = "resort" if force else "run"
+    db_path = _db_path()
+    try:
+        with run_lock(db_path), stop_on_sigterm():
+            log.info("Début du passage (%s, requête « %s », limite %s)", mode, query, limit)
+            box = _connect_gmail(authorize_if_missing=True)
+            client = _jev_client()
+            with client, Database.open(db_path) as db:
+                report = _run_passage(box, client, db, cfg, query, limit, yes, force, report_csv)
+    except AlreadyRunning as exc:
+        log.warning("%s", exc)
+        _fail(str(exc))
+    except (typer.Exit, typer.Abort, KeyboardInterrupt):
+        raise
+    except Exception:
+        log.exception("Erreur inattendue : passage arrêté")
+        raise
+    if report.stopped:
+        raise typer.Exit(code=2)
+
+
+def _run_passage(
+    box: gmail.Gmail,
+    client: jev.JevClient,
+    db: Database,
+    cfg: Config,
+    query: str,
+    limit: int | None,
+    yes: bool,
+    force: bool,
+    report_csv: bool,
+) -> RunReport:
+    mode = "resort" if force else "run"
+    with db.transaction():
+        run_id = db.start_run(mode)
+    runner = Runner(
+        box,
+        client,
+        db,
+        cfg,
+        user_addresses=_user_addresses(),
+        force=force,
+        keep_rows=report_csv,
+    )
+    try:
+        typer.echo("Synchronisation des labels et liste des mails…")
+        messages = runner.prepare(query, limit)
+        _print_sync(runner.report)
+        to_ask = runner.uncached_count(messages, force=force)
+        estimate = jev.cost_usd(to_ask * TOKENS_PER_MAIL_ESTIMATE)
+        typer.echo(
+            f"{len(messages)} mails dans le périmètre, dont {to_ask} à envoyer à Jev "
+            f"(coût estimé ≈ {estimate:.2f} $)."
+        )
+        _confirm_cost(to_ask, yes)
+        with _progress(len(messages), "Tri") as advance:
+            report = runner.run(messages, progress=advance)
+    except typer.Abort:
+        with db.transaction():
+            db.finish_run(run_id, {}, "annulé avant le tri")
+        raise
+    except KeyboardInterrupt:
+        with db.transaction():
+            db.finish_run(run_id, runner.report.as_stats(), "interrompu")
+        log.warning("Passage interrompu : le suivant reprendra là où il s'est arrêté.")
+        _fail("Passage interrompu : le suivant reprendra là où il s'est arrêté.", code=130)
+        raise
+    except (gmail.GmailError, jev.JevError) as exc:
+        with db.transaction():
+            db.finish_run(run_id, runner.report.as_stats(), str(exc))
+        _abort(_stop_message(exc))
+        raise
+
+    with db.transaction():
+        db.finish_run(run_id, report.as_stats(), report.stopped)
+    _log_report(cfg, report, box)
+    _print_run(cfg, report)
+    if report_csv:
+        path = Path(f"{mode}-{datetime.now():%Y%m%d-%H%M%S}.csv")
+        try:
+            write_rows_csv(cfg, runner.rows(), path, changes=True)
+            typer.echo(f"\nMails modifiés : {path}")
+        except gmail.GmailError as exc:
+            typer.echo(f"CSV non écrit : {exc}", err=True)
+    return report
+
+
+def _stop_message(exc: Exception) -> str:
+    if isinstance(exc, LabelSyncError):
+        return f"Synchronisation des labels impossible : {exc}"
+    if isinstance(exc, jev.JevAuthError):
+        return f"Accès Jev refusé : {exc}"
+    return str(exc)
+
+
+def _print_sync(report: RunReport) -> None:
+    sync = report.sync
+    if sync is None:
+        return
+    for name in sync.created:
+        typer.echo(f"  Label créé : {name}")
+    for old, new in sync.renamed:
+        typer.echo(f"  Label renommé : {old} → {new}")
+    for label_id in sync.recreated:
+        typer.echo(f"  Label supprimé dans Gmail, recréé : {label_id}")
+    for note in sync.color_notes:
+        typer.echo(f"  {note}")
+    for label_id in sync.orphans:
+        typer.echo(
+            f"  Label « {label_id} » retiré de labels.yaml mais gardé dans Gmail "
+            f"(`mailsort labels delete {label_id} --confirm` pour le supprimer)."
+        )
+
+
+def _log_report(cfg: Config, report: RunReport, box: gmail.Gmail) -> None:
+    names = {label.id: label.name for label in cfg.labels}
+
+    def fmt(counter: Counter[str]) -> str:
+        return ", ".join(f"{names.get(k, k)} {v}" for k, v in sorted(counter.items())) or "aucun"
+
+    log.info(
+        "Bilan : %d mails dans le périmètre, %d triés (%d nouveaux), %d ignorés, %d modifiés, "
+        "%d corrections manuelles, %d erreurs, %d 🤔 To Review",
+        report.listed,
+        report.total,
+        report.new,
+        report.skipped,
+        report.changed,
+        len(report.corrections),
+        len(report.errors),
+        report.label_counts.get("to_review", 0),
+    )
+    log.info("Labels ajoutés : %s", fmt(report.added))
+    log.info("Labels retirés : %s", fmt(report.removed))
+    log.info("Labels présents : %s", fmt(report.label_counts))
+    log.info("Doutes (label non posé) : %s", fmt(report.doubts))
+    log.info(
+        "Jev : %d appel(s), %d tokens, %.4f $ ; Gmail : %d nouvelle(s) tentative(s), %.0f s "
+        "d'attente pour le quota",
+        report.jev_calls,
+        report.input_tokens,
+        jev.cost_usd(report.input_tokens),
+        box.retries,
+        box.limiter.waited,
+    )
+    if report.stopped:
+        log.error("Passage arrêté avant la fin : %s", report.stopped)
+
+
+def _print_run(cfg: Config, report: RunReport) -> None:
+    total = report.total
+
+    def share(count: int) -> str:
+        return f"{100 * count / total:5.1f} %" if total else "    –"
+
+    typer.echo("")
+    details = [f"{total} mails triés", f"{report.new} nouveaux", f"{report.changed} modifiés"]
+    if report.skipped:
+        details.append(f"{report.skipped} ignorés")
+    if report.corrections:
+        details.append(f"{len(report.corrections)} corrections manuelles")
+    if report.errors:
+        details.append(f"{len(report.errors)} en erreur")
+    typer.echo(" · ".join(details))
+    typer.echo(
+        f"Jev : {report.jev_calls} appel(s) · {report.input_tokens} tokens · "
+        f"{jev.cost_usd(report.input_tokens):.4f} $"
+    )
+    typer.echo(f"\n  {'Label':<28} {'présents':>8}  {'part':>7}  {'ajoutés':>7}  {'retirés':>7}")
+    families = ["type", "domain", "action", "cleanup", "system"]
+    for family in families:
+        for label in cfg.labels:
+            if label.family != family or not label.enabled:
+                continue
+            count = report.label_counts[label.id]
+            typer.echo(
+                f"  {label.name:<28} {count:>8}  {share(count)}  "
+                f"{report.added[label.id]:>7}  {report.removed[label.id]:>7}"
+            )
+    typer.echo(f"\n  {'Aucun label':<28} {report.no_label:>8}  {share(report.no_label)}")
+    typer.echo(
+        f"  {'Seulement 🤔 To Review':<28} {report.review_only:>8}  {share(report.review_only)}"
+    )
+    if report.doubts:
+        names = {label.id: label.name for label in cfg.labels}
+        doubts = ", ".join(
+            f"{'type incertain' if k == 'type' else names.get(k, k)} {v}"
+            for k, v in report.doubts.most_common()
+        )
+        typer.echo(f"Doutes (label non posé) : {doubts}")
+    for message_id, error in report.errors[:5]:
+        typer.echo(f"Erreur sur {message_id} : {error}", err=True)
+    if len(report.errors) > 5:
+        typer.echo(f"… et {len(report.errors) - 5} autre(s) erreur(s).", err=True)
+    if report.errors:
+        typer.echo("Les mails en erreur seront repris au prochain passage.", err=True)
+    if report.stopped:
+        typer.echo(f"Passage arrêté avant la fin : {report.stopped}", err=True)
 
 
 def _print_review_list(cfg: Config, rows: list[Row]) -> None:
@@ -299,6 +577,8 @@ def _print_dry_run(cfg: Config, report: DryRunReport) -> None:
         typer.echo(f"Erreur sur {message_id} : {error}", err=True)
     if len(report.errors) > 5:
         typer.echo(f"… et {len(report.errors) - 5} autre(s) erreur(s).", err=True)
+    if report.stopped:
+        typer.echo(f"Passage arrêté avant la fin : {report.stopped}", err=True)
 
 
 def _print_notes_summary(cfg: Config, rows: list[Row]) -> None:
@@ -319,15 +599,109 @@ def resort(
     all_: Annotated[
         bool, typer.Option("--all", help="Repose toutes les questions sur tous les mails.")
     ] = False,
+    query: Annotated[
+        str, typer.Option("--query", "-q", help="Recherche Gmail pour restreindre les mails.")
+    ] = gmail.DEFAULT_QUERY,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Ne pas demander confirmation.")] = False,
+    config: ConfigPath = Path("labels.yaml"),
 ) -> None:
-    """Retri complet forcé."""
-    _not_implemented("étape 10")
+    """Retri complet forcé : repose toutes les questions à Jev, puis met Gmail à jour.
+    Les corrections manuelles (verrous) sont respectées."""
+    if not all_:
+        _fail(
+            "Ajouter --all pour confirmer : toutes les questions seront reposées à Jev sur tous "
+            "les mails (coût affiché avant de commencer)."
+        )
+    cfg = _load_config(config)
+    _real_run(cfg, query, None, yes, force=True, report_csv=False)
 
 
 @app.command("eval")
-def eval_() -> None:
-    """Compare le classement aux labels existants."""
-    _not_implemented("étape 9")
+def eval_(
+    compare: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--compare",
+            "-c",
+            help="Paire « Nom du label Gmail=id_du_label » (répétable). Par défaut : "
+            "« 💳 Paiements=payments » et « 📦 Réceptions=deliveries ».",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Ne pas demander confirmation.")] = False,
+    show: Annotated[
+        int, typer.Option("--show", help="Désaccords affichés par label (avec objet).")
+    ] = 15,
+    config: ConfigPath = Path("labels.yaml"),
+) -> None:
+    """Compare le classement de Jev aux labels Gmail existants, sans rien modifier."""
+    cfg = _load_config(config)
+    try:
+        pairs = [parse_pair(text, cfg) for text in compare] if compare else list(DEFAULT_PAIRS)
+    except ValueError as exc:
+        _fail(str(exc))
+    box = _connect_gmail()
+    client = _jev_client()
+    db_path = _db_path()
+    try:
+        with run_lock(db_path), client, Database.open(db_path) as db:
+            try:
+                evaluation = Evaluation(
+                    box, client, db, cfg, pairs, user_addresses=_user_addresses()
+                )
+                messages = evaluation.messages_to_classify()
+                to_ask = evaluation.dry.uncached_count(messages)
+                if messages:
+                    estimate = jev.cost_usd(to_ask * TOKENS_PER_MAIL_ESTIMATE)
+                    typer.echo(
+                        f"{len(messages)} mails de référence, dont {to_ask} à envoyer à Jev "
+                        f"(coût estimé ≈ {estimate:.2f} $)."
+                    )
+                    _confirm_cost(to_ask, yes)
+                with _progress(len(messages), "Classement") as advance:
+                    report = evaluation.classify(progress=advance)
+                results = evaluation.compare()
+                _print_eval(cfg, box, results, show)
+            except (gmail.GmailError, jev.JevError) as exc:
+                _fail(str(exc))
+    except AlreadyRunning as exc:
+        _fail(str(exc))
+    if report.errors:
+        typer.echo(f"{len(report.errors)} mail(s) en erreur, non comptés.", err=True)
+
+
+def _describe(box: gmail.Gmail, message_id: str) -> str:
+    try:
+        headers = box.get_headers(message_id, ["From", "Subject"])
+    except gmail.GmailError:
+        return message_id
+    sender = str(headers.get("From") or "")[:30]
+    subject = str(headers.get("Subject") or "(sans objet)")[:60]
+    return f"{message_id}  {sender:<30}  {subject}"
+
+
+def _print_eval(cfg: Config, box: gmail.Gmail, results: list, show: int) -> None:
+    for result in results:
+        name = cfg.by_id[result.label_id].name
+        typer.echo(f"\n« {result.gmail_name} » face à {name}")
+        if not result.found:
+            typer.echo("  Label introuvable dans Gmail : rien à comparer.")
+            continue
+        typer.echo(
+            f"  {result.reference} mails de référence, {result.population} mails comparés · "
+            f"accord {100 * result.agreement:.1f} % · rappel {100 * result.recall:.1f} % · "
+            f"précision {100 * result.precision:.1f} %"
+        )
+        for title, ids in (
+            (f"Référence sans {name} (oubli)", result.missed),
+            (f"{name} sans la référence (ajout)", result.extra),
+        ):
+            if not ids:
+                continue
+            typer.echo(f"  {title} : {len(ids)}")
+            for message_id in ids[:show]:
+                typer.echo(f"    {_describe(box, message_id)}")
+            if len(ids) > show:
+                typer.echo(f"    … et {len(ids) - show} autre(s)")
 
 
 @app.command()
@@ -487,9 +861,43 @@ def _print_classification(cfg: Config, summary: MailSummary, result: jev.Classif
 
 
 @app.command()
-def corrections() -> None:
-    """Liste les corrections manuelles par label."""
-    _not_implemented("étape 10")
+def corrections(
+    show: Annotated[
+        int, typer.Option("--show", help="Corrections affichées par label (avec objet).")
+    ] = 10,
+    config: ConfigPath = Path("labels.yaml"),
+) -> None:
+    """Liste les corrections manuelles par label, avec la probabilité donnée par Jev."""
+    cfg = _load_config(config)
+    db_path = _db_path()
+    if not db_path.exists():
+        typer.echo("Aucune base : aucun passage n'a encore eu lieu.")
+        return
+    with Database.open(db_path) as db:
+        grouped = db.corrections_by_label()
+    if not grouped:
+        typer.echo("Aucune correction manuelle enregistrée.")
+        return
+    box: gmail.Gmail | None = None
+    try:
+        box = gmail.Gmail.connect(gmail.token_path())
+    except gmail.GmailError:
+        typer.echo("(Gmail inaccessible : objets des mails non affichés.)", err=True)
+    for label_id, items in sorted(grouped.items(), key=lambda kv: -len(kv[1])):
+        label = cfg.by_id.get(label_id)
+        name = label.name if label else f"{label_id} (retiré du fichier)"
+        added = sum(1 for c in items if c.action == "added")
+        typer.echo(
+            f"\n{name} : {len(items)} correction(s), {added} ajout(s), "
+            f"{len(items) - added} retrait(s)"
+        )
+        for item in items[:show]:
+            action = "ajouté " if item.action == "added" else "retiré "
+            probability = "–" if item.probability is None else f"{item.probability:.2f}"
+            where = _describe(box, item.message_id) if box else item.message_id
+            typer.echo(f"  {item.corrected_at[:10]}  {action} Jev {probability:>4}  {where}")
+        if len(items) > show:
+            typer.echo(f"  … et {len(items) - show} autre(s)")
 
 
 @labels_app.command("check")
@@ -508,6 +916,37 @@ def labels_check(config: ConfigPath = Path("labels.yaml")) -> None:
 def labels_delete(
     label_id: Annotated[str, typer.Argument(help="Identifiant du label dans labels.yaml.")],
     confirm: Annotated[bool, typer.Option("--confirm", help="Confirme la suppression.")] = False,
+    config: ConfigPath = Path("labels.yaml"),
 ) -> None:
-    """Supprime de Gmail un label retiré de labels.yaml."""
-    _not_implemented("étape 10")
+    """Supprime de Gmail un label retiré de labels.yaml (les mails restent, sans ce label)."""
+    cfg = _load_config(config)
+    if label_id in cfg.by_id:
+        _fail(
+            f"« {label_id} » est encore dans labels.yaml : le retirer du fichier d'abord "
+            "(ou le désactiver avec enabled: false pour le garder sans l'évaluer)."
+        )
+    db_path = _db_path()
+    with Database.open(db_path) as db:
+        link = db.gmail_labels().get(label_id)
+        if link is None or label_id.startswith(PARENT_KEY.split("{")[0]):
+            _fail(f"Aucun label Gmail connu pour « {label_id} ».")
+        if not confirm:
+            _fail(
+                f"Supprimerait le label Gmail « {link.name} ». Les mails restent, ils perdent "
+                "seulement ce label. Relancer avec --confirm pour le faire."
+            )
+        box = _connect_gmail()
+        setup_logging()
+        try:
+            with run_lock(db_path):
+                with suppress(gmail.GmailNotFoundError):  # déjà supprimé dans Gmail
+                    box.delete_label(link.gmail_id)
+                with db.transaction():
+                    db.forget_label(label_id)
+                    db.delete_gmail_label(label_id)
+        except AlreadyRunning as exc:
+            _fail(str(exc))
+        except gmail.GmailError as exc:
+            _fail(str(exc))
+    log.info("Label supprimé de Gmail : %s (%s)", link.name, label_id)
+    typer.echo(f"Label « {link.name} » supprimé de Gmail.")

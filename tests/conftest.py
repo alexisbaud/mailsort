@@ -14,3 +14,6 @@ def _isolate_from_local_files(monkeypatch, tmp_path):
     monkeypatch.setenv("GOOGLE_CLIENT_SECRET_FILE", str(secrets / "credentials.json"))
     monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(secrets / "token.json"))
     monkeypatch.setenv("MAILSORT_DB", str(tmp_path / "mailsort.db"))
+    monkeypatch.setenv("MAILSORT_LOG_DIR", str(tmp_path / "logs"))
+    # Les nouvelles tentatives Gmail n'attendent pas pendant les tests.
+    monkeypatch.setattr("mailsort.gmail._sleep", lambda seconds: None)
