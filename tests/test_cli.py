@@ -239,3 +239,17 @@ def test_dry_run_command(monkeypatch, tmp_path):
     assert counts["Aucun label"] == 0
     assert counts["Total trié"] == 2
     assert len(list(tmp_path.glob("dry-run-*.csv"))) == 1
+
+    review = result.output.split("Mails 🤔 To Review (1)")[1]
+    assert "m2  2026-11-24  Boutique <shop@example.com>" in review
+    assert "Objet  : Rien" in review
+    assert "Labels : aucun autre label" in review
+    assert "• aucun repère : meilleur type aucun type 1.00" in review
+    assert "Facture" not in review.split("Types")[0]
+    summary = result.output.split("Doutes et absence de repère")[1]
+    assert "Aucun repère (ni type, ni domaine, ni nettoyage)" in summary
+
+    quiet = runner.invoke(app, ["run", "--dry-run", "--no-review", "--config", str(labels)])
+    assert quiet.exit_code == 0, quiet.output
+    assert "Mails 🤔 To Review" not in quiet.output
+    assert "Doutes et absence de repère" in quiet.output

@@ -40,7 +40,7 @@ Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou emp
    - l'**empreinte des règles** (seuils, `enabled`, `never_with`, `protects_from`) : si elle change, les règles sont recalculées sur tous les mails à partir des probabilités enregistrées, sans appeler Jev.
 3. **Lister les mails à traiter.** Ce sont les messages jamais traités, plus tous les messages si un label est à re-évaluer. Le programme ignore les spams, la corbeille, les brouillons et les messages envoyés par Alexis.
 4. **Préparer chaque mail.** Il extrait l'expéditeur, les destinataires, l'objet, la date, les en-têtes de liste de diffusion, les noms des pièces jointes et le texte nettoyé et tronqué (voir la section sur les données envoyées).
-5. **Interroger Jev.** Un appel par mail : le mail est l'« état ». Les types forment une seule question à choix (question `choice` : les 7 types plus « None of the above ») ; chaque autre label est une question oui/non (question `noul`) construite à partir de sa description. Jev renvoie une probabilité par option et par label. Un second appel, limité aux types, peut suivre pour chercher un type secondaire (section Règles de décision).
+5. **Interroger Jev.** Un appel par mail : le mail est l'« état ». Les types forment une seule question à choix (question `choice` : les 9 types plus « None of the above ») ; chaque autre label est une question oui/non (question `noul`) construite à partir de sa description. Jev renvoie une probabilité par option et par label. Un second appel, limité aux types, peut suivre pour chercher un type secondaire (section Règles de décision).
 6. **Appliquer les règles.** Le code applique les seuils, les exclusions et les protections (section Règles de décision).
 7. **Mettre à jour Gmail.** Le programme ajoute les labels gagnés et retire ceux qu'il avait posés et qui ne s'appliquent plus. Il ne touche jamais un label qu'Alexis a corrigé à la main.
 8. **Enregistrer.** Une base SQLite garde, pour chaque message, les probabilités de chaque question avec son empreinte, les labels posés par le programme et l'empreinte des règles utilisée. Elle garde aussi les verrous, l'historique des corrections, le lien entre chaque label et son label Gmail, et le bilan des passages. Chaque message est enregistré d'un bloc (transaction) : un passage interrompu ne laisse pas de message à moitié traité. Le schéma est versionné, et une nouvelle version du programme met la base à jour au démarrage.
@@ -52,53 +52,57 @@ Les labels Gmail s'appliquent message par message : dans la boîte, un fil affic
 
 ## Les labels
 
-18 labels en 5 familles, rangés dans Gmail sous 3 labels parents : Types, Domains et Actions (par exemple « Types/💳 Payments » ; To Reply, Deletable et To Review vont sous Actions). Les types disent ce qu'est le mail, les domaines à quelle partie de la vie il se rapporte, l'action ce qu'il faut en faire. Les types forment une seule question à choix, avec une option « None of the above » décrite ainsi : « None of the other types applies. This email is not a proof of payment or refund, not the tracking of a shipment, return or download, not a ticket or booking, not an official or contractual document, not an account or security notification, not a newsletter, digest or changelog, and not a promotional or marketing message. » Les autres labels sont des questions oui/non, donc un mail peut cumuler plusieurs domaines.
+20 labels en 5 familles, rangés dans Gmail sous 3 labels parents : Types, Domains et Actions (par exemple « Types/💳 Payments » ; To Reply, Deletable et To Review vont sous Actions). Les types disent ce qu'est le mail, les domaines à quelle partie de la vie il se rapporte, l'action ce qu'il faut en faire. Les types forment une seule question à choix, avec une option « None of the above » décrite ainsi : « None of the other types applies. This email is not a proof of payment or refund, not the tracking of a shipment, return or download, not a ticket or booking, not an official or contractual document, not an account or security notification, not a subscription or service notice, not a customer support exchange, not a newsletter, digest or changelog, and not a promotional or marketing message. » Les autres labels sont des questions oui/non, donc un mail peut cumuler plusieurs domaines.
 
-Les descriptions sont en anglais, car c'est ce que Jev lira. Elles décrivent des catégories, jamais une marque, un site ou un organisme.
+Les descriptions sont en anglais, car c'est ce que Jev lira. Elles décrivent des catégories, jamais une marque, un site ou un organisme. Chacune se termine par « Not: … », ce que le label ne doit pas contenir, pour lever les ambiguïtés vues au passage à blanc.
 
 | Label | Famille | Couleur | Description envoyée à Jev |
 | --- | --- | --- | --- |
-| 💳 Payments | Type | `#17a765` | Proof that the user paid for something or was refunded: invoices, receipts, paid order confirmations (including free orders), payment confirmations, rent receipts, charged subscription renewals, refunds. Not: payment reminders before paying, failed payments, quotes, price change announcements, money received by the user. |
-| 📦 Deliveries | Type | `#ff7537` | Tracking of something the user ordered or obtained until it reaches them: shipping, tracking, delivery, pickup points, returns and exchanges, a device sent for repair, a file or resource made available for download, even if free. |
-| 🎟️ Tickets & Bookings | Type | `#7858c2` | An access ticket or reservation tied to a date or place: transport tickets, show or event tickets, boarding passes, accommodation, restaurant or appointment bookings, event registrations, and changes or cancellations to them. |
-| 📄 Official Documents | Type | `#1e53b8` | A document with administrative, contractual or legal value worth keeping: contracts, certificates, attestations, payslips, tax notices, official statements, summons, electronically signed documents. |
-| 🔐 Accounts & Security | Type | `#757575` | Management of one of the user's online accounts: account creation, email verification, login or verification codes, password resets, sign-in or new device alerts, two-factor authentication, account detail changes, updates to terms of use or privacy policies. |
-| 📰 Newsletters & Digests | Type | `#007286` | Informational content sent regularly by subscription: newsletters, digests, summaries, release notes, changelogs, announcements of new features in a product the user uses, activity recaps. Not: messages whose main goal is to sell. |
-| 📣 Marketing | Type | `#c2175b` | A commercial message trying to make the user buy, consume or come back: promotions, sales, discount codes, offers, new products, abandoned carts, recommendations, referral programs, review requests, satisfaction surveys. |
-| 🏠 Housing | Domaine | `#ffc8af` | The user's home: renting, rent, landlord or agency, flatsharing, service charges, energy, water, internet access, home insurance, repairs, moving, housing benefits. |
-| 🏛️ Administration | Domaine | `#ebdbde` | Formalities with public administrations and public bodies: taxes, identity documents, civil status, social security, benefits, vehicles, fines, justice. |
-| 🩺 Health | Domaine | `#fcd2e0` | The user's physical and mental health: medical appointments, prescriptions, test results, healthcare reimbursements, health insurance, pharmacy. |
-| 🏦 Banking & Investments | Domaine | `#b4efd3` | The user's money: bank accounts, cards, transfers, direct debits, bank fees, savings, investments, loans, cryptocurrencies. |
-| 💼 Work | Domaine | `#b6cff5` | The user's professional life, as an employee or self-employed: employer, colleagues, recruiting, job applications, employment contracts, payroll, work tools, clients, prospects, quotes and invoices sent by the user, freelance activity and status, professional network. |
-| 🎓 Studies & Training | Domaine | `#e3d7ff` | Learning: school, university, the school side of a work-study program, courses, exams, diplomas, online training, certifications, alumni. |
-| ✈️ Travels | Domaine | `#99d7e4` | Trips outside daily life: long-distance transport, accommodation, stays, visas and travel formalities, tax-free shopping refunds, car rental, travel insurance, activities at the destination. |
-| 👨‍👩‍👧 Family & Friends | Domaine | `#fbe983` | Personal exchanges with family, friends, a partner or acquaintances: messages written by someone close to the user, emails forwarded by them, personal invitations, group money pots between friends. |
-| ✉️ To Reply | Action | `#b1b1b1` | A message that expects an answer or a specific action from the user: a person asking a question, making a request or waiting for a confirmation, or an organization asking for a document or an action before a deadline. Not: automatic notifications that require nothing. |
-| 🗑️ Deletable | Nettoyage | `#d93025` | A message with no value once read or once its date has passed: advertising, social network notifications, generic reminders, expired offers, mailing list subscription confirmations, surveys. |
+| 💳 Payments | Type | `#17a765` | Proof that money actually moved for the user: invoices, receipts, paid order confirmations (including free orders), payment confirmations, rent receipts, charged subscription renewals, refunds. Not: upcoming charges, renewal or expiry reminders, failed or declined payments, payment method problems, quotes, price or fee change announcements, money received by the user, shipping or delivery updates. |
+| 📦 Deliveries | Type | `#ff7537` | Tracking of something the user ordered or obtained until it reaches them: shipping, tracking, delivery, pickup points and pickup appointments, returns and exchanges, a device sent for repair, a file or resource made available for download, even if free. Not: the order or payment confirmation itself, promotions about delivery offers, customer service replies about an order. |
+| 🎟️ Tickets & Bookings | Type | `#7858c2` | An access ticket or reservation tied to a date or place: transport tickets, show or event tickets, boarding passes, accommodation, restaurant or appointment bookings, event registrations, and changes or cancellations to them. Not: travel or event promotions and discount codes, review requests after a trip, subscriptions to a mobility service, generic reminders with no specific reservation. |
+| 📄 Official Documents | Type | `#1e53b8` | A document with administrative, contractual or legal value worth keeping: contracts, certificates, attestations, payslips, tax notices, official statements, summons, electronically signed documents. Not: newsletters or general information from an administration, terms of use or privacy policy updates, simple receipts for a purchase, verification codes. |
+| 🔐 Accounts & Security | Type | `#757575` | Identity and access to one of the user's online accounts: account creation, email verification, login or verification codes, password resets, sign-in or new device alerts, two-factor authentication, permissions or data shared with a third-party app, account detail changes. Not: subscription status, renewals, plan, price or terms changes, service activation or configuration, customer service replies, newsletters about security tips. |
+| 📰 Newsletters & Digests | Type | `#007286` | Content whose purpose is to inform, with no incentive to buy: newsletters, digests, summaries, release notes, changelogs, announcements about a product or service the user uses, awareness and prevention messages (safety tips, responsible use, a company's commitments), activity recaps. Not: messages that push the user to buy, subscribe or come back, discount codes, notices about the user's own subscription or account. |
+| 📣 Marketing | Type | `#c2175b` | A message whose purpose is to make the user buy, subscribe or come back: promotions, sales, discount codes, offers, new products to buy, abandoned carts, recommendations, referral programs, win-back messages, requests to review a product, a service or a trip. Not: purely informative messages with no incentive, surveys about a customer service request, receipts or confirmations of something already bought. |
+| 🎧 Support | Type | `#4a86e8` (provisoire) | An exchange with a company's customer service about a request the user made: acknowledgment of a request or ticket, a reply from an agent, a follow-up question, a satisfaction survey about how the request was handled. Not: security or sign-in notifications, order or payment confirmations, newsletters, promotional surveys unrelated to a request. |
+| 🔁 Subscriptions & Services | Type | `#a46a21` (provisoire) | The life of a subscription or service the user uses, when no money has moved yet: upcoming renewals and expiry reminders, plan, price, fee or terms changes, failed payments or missing payment methods, activation, configuration or cancellation of a service or option, invitations to join a team workspace. Not: receipts for charges already made, sign-in or security alerts, promotional offers to subscribe to something new, customer service exchanges. |
+| 🏠 Housing | Domaine | `#ffc8af` | The user's home: renting, rent, landlord or agency, flatsharing, service charges, energy, water, internet access, home insurance, repairs, moving, housing benefits. Not: hotels or short stays during a trip, mobile phone plans, purchases of household items. |
+| 🏛️ Administration | Domaine | `#ebdbde` | Formalities with public administrations and public bodies: taxes, identity documents, civil status, social security, benefits, vehicles, fines, justice. Not: tax-free shopping refunds for travelers, invoices or terms from private companies, medical care itself. |
+| 🩺 Health | Domaine | `#fcd2e0` | The user's physical and mental health: medical appointments, prescriptions, test results, healthcare reimbursements, health insurance, pharmacy. Not: generic communication from a health company with nothing about the user's own care, fitness or wellness promotions. |
+| 🏦 Banking & Investments | Domaine | `#b4efd3` | The user's money: bank accounts, cards, transfers, direct debits, bank fees, savings, investments, loans, cryptocurrencies. Not: purchases, trips or receipts paid by card, payments to a merchant, tax-free refunds, invoices from a company that is not a bank. |
+| 💼 Work | Domaine | `#b6cff5` | The user's professional life, as an employee or self-employed: employer, colleagues, recruiting, job applications, employment contracts, payroll, work tools, clients, prospects, quotes and invoices sent by the user, freelance activity and status, freelance or side-project collaborations even from personal email addresses, professional network. Not: promotions or newsletters from professional tools and platforms, school or training matters, generic job-market marketing. |
+| 🎓 Studies & Training | Domaine | `#e3d7ff` | Learning: school, university, the school side of a work-study program, courses, exams, diplomas, online training, certifications, alumni. Not: marketing for paid or free courses the user did not enroll in, professional collaborations, newsletters about a profession. |
+| ✈️ Travels | Domaine | `#99d7e4` | Trips outside daily life: long-distance transport, accommodation, stays, visas and travel formalities, tax-free shopping refunds, car rental, travel insurance, activities at the destination. Not: daily commuting or local mobility, travel promotions and discount codes, newsletters from transport companies. |
+| 👨‍👩‍👧 Family & Friends | Domaine | `#fbe983` | Personal exchanges with family, friends, a partner or acquaintances: messages written by someone close to the user, including a sender sharing the user's family name, emails forwarded by them, personal invitations, group money pots between friends. Not: automated messages, even when signed with a first name; colleagues or clients in a professional context; customer service agents. |
+| ✉️ To Reply | Action | `#b1b1b1` | A message that expects an answer or a specific action from the user: a person asking a question, making a request or waiting for a confirmation, or an organization asking for a document or an action before a deadline. Not: automatic notifications that require nothing, promotional calls to action, review requests and satisfaction surveys, verification codes the user requested. |
+| 🗑️ Deletable | Nettoyage | `#d93025` | A message with no value once read or once its date has passed: advertising, social network notifications, generic reminders, expired offers, mailing list subscription confirmations, surveys. Not: invitations addressed personally to the user (collaboration, team, code repository), alerts about unusual account activity, anything the user may need to act on or prove later. |
 | 🤔 To Review | Technique | `#ffae47` | Posé par le code, pas par Jev (voir Règles de décision). |
 
 ## Règles de décision
 
 Jev donne une probabilité entre 0 et 1 pour chaque label ; le code décide ensuite, avec les règles ci-dessous, dans cet ordre.
 
-1. **Type principal.** Jev choisit une option parmi les 7 types et « None of the above ». Le type gagnant est posé si sa probabilité atteint 0,60. Si « None of the above » gagne, le mail n'a pas de type.
+1. **Type principal.** Jev choisit une option parmi les 9 types et « None of the above ». Le type gagnant est posé si sa probabilité atteint 0,60, ou si les deux premières options sont des types dont les probabilités cumulées atteignent 0,80 (`primary_pair_sum`) : Jev partage alors sa certitude entre deux types, comme pour une quittance de loyer (💳 Payments 0,55 et 📄 Official Documents 0,44). Si « None of the above » gagne, le mail n'a pas de type.
 2. **Type secondaire, par un second passage.** Si un autre type a obtenu au moins 0,30 au premier passage, le programme repose la question des types à Jev, sans le type gagnant. La consigne précise : « This email has already been classified as \<type gagnant>. Is it also one of the following? ». Si Jev choisit alors ce même type avec au moins 0,70, il est posé en plus. S'il choisit « None of the above » ou un autre type, rien n'est ajouté. Un mail a au plus 2 types.
 3. **Paires interdites.** Le type secondaire n'est jamais posé s'il forme l'une de ces paires avec le type principal :
    - 💳 Payments et 📦 Deliveries ;
-   - 📰 Newsletters & Digests et 📣 Marketing.
-4. **Autres labels.** Domaines, ✉️ To Reply et 🗑️ Deletable sont posés si leur probabilité oui/non atteint 0,80. Chaque label peut avoir son propre seuil dans `labels.yaml`.
+   - 📰 Newsletters & Digests et 📣 Marketing ;
+   - 🔁 Subscriptions & Services et 💳 Payments : un rappel d'échéance n'est pas une preuve de paiement.
+4. **Autres labels.** Chaque question oui/non a un seuil : 0,70 pour les domaines (`yes_no_min_by_family`), 0,55 pour 🗑️ Deletable (seuil propre au label), 0,80 pour ✉️ To Reply (`yes_no_min`, par défaut). Le label est posé si sa probabilité atteint son seuil.
 5. **Protections.** 🗑️ Deletable n'est jamais posé si le mail a aussi 💳 Payments, 📄 Official Documents, 🎟️ Tickets & Bookings, 👨‍👩‍👧 Family & Friends ou ✉️ To Reply.
 6. **Déjà répondu.** ✉️ To Reply est retiré dès que le dernier message du fil vient d'Alexis. Le programme le vérifie à chaque passage, sans appeler Jev.
-7. **Zone de doute.** Le mail reçoit 🤔 To Review si le type gagnant est sous 0,60, ou si une question oui/non tombe entre 0,50 et 0,80. Le label douteux n'est alors pas posé.
-8. **Mail sans repère.** Si un mail ne reçoit ni type, ni domaine, ni 🗑️ Deletable, il reçoit 🤔 To Review.
+7. **Zone de doute.** Un type incertain (ni 0,60, ni deux types à 0,80) ou une question oui/non entre 0,50 et son seuil est un doute : le label n'est pas posé. Le doute est enregistré dans la base, écrit dans le journal et affiché par `mailsort explain`, mais il n'envoie pas en 🤔 To Review.
+8. **Mail sans repère.** 🤔 To Review est posé uniquement si le mail ne reçoit ni type, ni domaine, ni 🗑️ Deletable.
 
-🤔 To Review disparaît dès qu'Alexis pose ou retire à la main un label de la famille concernée : sa correction tranche.
+🤔 To Review disparaît dès qu'Alexis pose ou retire à la main un type, un domaine ou 🗑️ Deletable : sa correction tranche. De même, une correction sur un label d'une famille efface les doutes de cette famille.
 
 **Précisions appliquées par le code :**
 
-- si « None of the above » gagne avec moins de 0,60, le mail reçoit aussi 🤔 To Review : le choix de type est incertain ;
+- si « None of the above » gagne avec moins de 0,60, ou s'il arrive en deuxième position, la règle des deux types ne s'applique pas : seul le seuil de 0,60 compte, car ce partage traduit un doute sur le type, pas un mail qui relève de deux types ;
 - en cas d'égalité entre deux options, la première dans l'ordre de `labels.yaml` gagne ;
 - les paires interdites valent dans les deux sens. Le second passage n'est pas demandé si le type candidat forme une paire interdite avec le gagnant : il ne pourrait pas être posé, l'appel serait inutile ;
+- le second passage suit la même condition que le type principal : il n'est demandé que si le gagnant est posé (0,60, ou deux types à 0,80) ;
 - le type secondaire ne crée jamais de doute : sous 0,70, il est simplement ignoré ;
 - un doute sur un label bloqué par une protection, ou sur ✉️ To Reply alors qu'Alexis a déjà répondu, n'en est pas un ;
 - une fois ✉️ To Reply retiré par la règle 6, il ne protège plus de 🗑️ Deletable ;
@@ -114,16 +118,18 @@ Tous les labels vivent dans un seul fichier, `labels.yaml`. Alexis le modifie av
 settings:
   types:
     primary_min: 0.60        # seuil du type principal
+    primary_pair_sum: 0.80   # ou : somme des deux premiers types (mail qui relève de deux types)
     secondary_trigger: 0.30  # déclenche le second passage
     secondary_min: 0.70      # seuil du type secondaire
     none_description: >
       None of the other types applies. This email is not a proof of payment
-      or refund, not the tracking of a shipment, return or download, not a
-      ticket or booking, not an official or contractual document, not an
-      account or security notification, not a newsletter, digest or
-      changelog, and not a promotional or marketing message.
-  yes_no_min: 0.80           # seuil par défaut des questions oui/non
-  doubt_min: 0.50            # en dessous : non ; entre les deux : To Review
+      or refund, ...
+  user:
+    full_name: "Alexis Baud"   # donné à Jev en tête de chaque mail
+  yes_no_min: 0.80           # seuil par défaut des questions oui/non (To Reply)
+  yes_no_min_by_family:      # seuil d'une famille, à la place de yes_no_min
+    domain: 0.70
+  doubt_min: 0.50            # entre doubt_min et le seuil : doute noté, label non posé
   parents:                   # label parent Gmail de chaque famille
     type: Types
     domain: Domains
@@ -146,20 +152,21 @@ labels:
     never_with: [deliveries] # optionnel : paire interdite
     protects_from: [deletable] # optionnel : bloque ces labels
     description: >
-      Proof that the user paid for something or was refunded: ...
+      Proof that money actually moved for the user: ...
 ```
 
 | Champ | Rôle |
 | --- | --- |
 | `settings.types` | Seuils du choix de type et description de « None of the above » |
-| `settings.yes_no_min`, `doubt_min` | Seuils par défaut des questions oui/non |
+| `settings.user.full_name` | Nom d'Alexis, envoyé à Jev en tête de chaque mail ; le changer repose toutes les questions |
+| `settings.yes_no_min`, `yes_no_min_by_family`, `doubt_min` | Seuil par défaut des questions oui/non, seuil par famille, début de la zone de doute |
 | `settings.visibility` | Visibilité par famille, appliquée seulement à la création du label |
 | `id` | Lien permanent entre le fichier, la base et le label Gmail |
 | `name` | Nom du sous-label, rangé sous le parent de sa famille (`settings.parents`) ; le changer renomme le label sans perdre les mails classés |
 | `family` | `type` = une option du choix de type ; `domain`, `action`, `cleanup` = une question oui/non ; `system` = posé par le code (🤔 To Review) |
 | `color` | Couleur de fond en hexadécimal, appliquée seulement à la création du label |
 | `enabled` | `false` = le label n'est plus évalué, mais reste dans Gmail |
-| `threshold` | Seuil propre à un label oui/non (optionnel) |
+| `threshold` | Seuil propre à un label oui/non (optionnel, prioritaire sur celui de sa famille) |
 | `never_with` | Types qui ne peuvent pas être type secondaire avec celui-ci |
 | `protects_from` | Labels interdits quand celui-ci est posé |
 | `description` | Texte envoyé à Jev, en anglais et générique |
@@ -183,7 +190,7 @@ labels:
 
 La couleur de fond est le code hexadécimal de la colonne Couleur. Le programme choisit la couleur du texte : blanc sur un fond foncé, gris très foncé sur un fond clair. L'API Gmail n'accepte qu'une palette fixe : si un code n'en fait pas partie, le programme prend la valeur acceptée la plus proche et l'indique dans le journal.
 
-Au démarrage, le programme valide le fichier : `id` en double, famille inconnue, paire interdite ou protection qui vise un label inexistant, `never_with` posé sur un label ou visant un label qui n'est pas un type, champ inconnu (faute de frappe), couleur ou seuil invalide, `threshold` sur un label qui n'est pas oui/non ou inférieur à `doubt_min`, description manquante, nom Gmail en double ou contenant « / », label `to_review` absent. En cas d'erreur, il s'arrête sans rien toucher et liste toutes les erreurs d'un coup.
+Au démarrage, le programme valide le fichier : `id` en double, famille inconnue, paire interdite ou protection qui vise un label inexistant, `never_with` posé sur un label ou visant un label qui n'est pas un type, champ inconnu (faute de frappe), couleur ou seuil invalide, `threshold` sur un label qui n'est pas oui/non ou inférieur à `doubt_min`, seuil de famille inférieur à `doubt_min` ou sur une famille qui n'est pas oui/non, `primary_pair_sum` inférieur à `primary_min`, nom d'utilisateur vide, description manquante, nom Gmail en double ou contenant « / », label `to_review` absent. En cas d'erreur, il s'arrête sans rien toucher et liste toutes les erreurs d'un coup.
 
 ## Retri et corrections manuelles
 
@@ -191,7 +198,7 @@ Un changement de label déclenche le retri de toute la boîte, mais seules les q
 
 **Retri complet forcé** : la commande `mailsort resort --all` repose toutes les questions sur tous les mails.
 
-**Nouvelle version de Jev** : la version est épinglée dans `.env` (`JEV_MODEL`). L'empreinte enregistrée pour chaque réponse inclut cette version et celle des consignes envoyées à Jev : changer `JEV_MODEL` fait donc reposer toutes les questions au passage suivant, sans commande à lancer.
+**Nouvelle version de Jev** : la version est épinglée dans `.env` (`JEV_MODEL`). L'empreinte enregistrée pour chaque réponse inclut cette version, celle des consignes envoyées à Jev et le nom de l'utilisateur : changer `JEV_MODEL` fait donc reposer toutes les questions au passage suivant, sans commande à lancer.
 
 **Corrections manuelles** : à chaque passage, le programme compare les labels présents dans Gmail avec ceux qu'il a posés la dernière fois.
 
@@ -207,6 +214,7 @@ Jev reçoit un résumé structuré de chaque mail. Le texte est d'abord nettoyé
 
 | Donnée | Pourquoi |
 | --- | --- |
+| Nom d'Alexis, en tête : « User: Alexis Baud (the owner of this mailbox) » (tiré de `settings.user.full_name`) | Reconnaître un proche qui porte le même nom de famille |
 | Expéditeur (nom et adresse) | Distinguer une personne d'un envoi automatique |
 | Place d'Alexis : destinataire direct, en copie ou via une liste (adresse du compte Gmail, plus les alias de `MAILSORT_USER_EMAILS`) | Repérer les envois de masse |
 | Objet et date | Signal principal |
@@ -256,7 +264,7 @@ Trier 1 000 mails coûte environ 0,10 à 0,13 $ (au pire 0,30 $ avec beaucoup de
 
 Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis remplace les filtres actuels.
 
-1. **Test à blanc.** `mailsort run --dry-run` lit les vrais mails, interroge Jev et applique les règles, sans rien modifier dans Gmail : aucun label n'est créé, posé ou retiré. Il affiche le nombre de mails par label, le nombre de mails sans aucun label, ceux dont le seul label serait 🤔 To Review, et le total trié. Il écrit aussi un CSV (mail, probabilités, labels qui seraient posés, raisons de 🤔 To Review). Par défaut il traite les 200 mails les plus récents ; `--limit N`, `--all` et `--query` changent le périmètre. Au-delà de 500 mails à envoyer à Jev, il affiche le coût estimé et demande confirmation. Les réponses de Jev sont enregistrées dans la base (pas les décisions) : relancer le test après un changement de seuil ne coûte rien, et seules les questions modifiées sont reposées. Si aucun jeton Gmail n'existe encore, il ouvre le navigateur pour l'autorisation.
+1. **Test à blanc.** `mailsort run --dry-run` lit les vrais mails, interroge Jev et applique les règles, sans rien modifier dans Gmail : aucun label n'est créé, posé ou retiré. Il affiche le nombre de mails par label, le nombre de mails sans aucun label, ceux dont le seul label serait 🤔 To Review, et le total trié. Avant ce bilan, il liste chaque mail qui irait dans 🤔 To Review (donc sans repère) : identifiant, date, expéditeur, objet, autres labels, ses doutes avec leurs scores (type incertain : les trois meilleurs types et les seuils ; doute : le score et le seuil du label) et les repères les plus proches (meilleur type, trois domaines ou nettoyages les mieux notés). Après le bilan, il compte les mails par doute et par absence de repère, avec le nombre de ceux qui partent en 🤔 To Review. `--no-review` masque la liste. Il écrit aussi un CSV : mail, probabilités, labels qui seraient posés, doutes et absence de repère (`review_reasons`), et `to_review` (`yes` ou `no`) qui dit si le mail part réellement en 🤔 To Review. Par défaut il traite les 200 mails les plus récents ; `--limit N`, `--all` et `--query` changent le périmètre. Au-delà de 500 mails à envoyer à Jev, il affiche le coût estimé et demande confirmation. Les réponses de Jev sont enregistrées dans la base (pas les décisions) : relancer le test après un changement de seuil ne coûte rien, et seules les questions modifiées sont reposées. Si aucun jeton Gmail n'existe encore, il ouvre le navigateur pour l'autorisation.
 2. **Mesure de qualité.** `mailsort eval` compare le résultat aux labels actuels « 💳 Paiements » (≈ 90 fils) et « 📦 Réceptions » (≈ 45 fils), classés à la main et par filtres. Il affiche les mails où Jev n'est pas d'accord, pour ajuster descriptions et seuils.
 3. **Reprise des labels existants.** Le programme renomme « 💳 Paiements » en « Types/💳 Payments » et « 📦 Réceptions » en « Types/📦 Deliveries », en gardant leurs mails. Ces labels existants ne comptent pas comme des corrections manuelles.
 4. **Premier passage réel.** Il classe toute la boîte, puis produit un rapport des labels ajoutés et retirés.
@@ -266,7 +274,7 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | --- | --- |
 | `mailsort auth` | Connexion à Gmail dans le navigateur ; crée ou remplace `token.json` (à lancer sur le Mac) |
 | `mailsort run` | Passage normal : nouveaux mails et labels modifiés |
-| `mailsort run --dry-run [--limit N \| --all] [--query …]` | Classe sans rien modifier dans Gmail : bilan par label, sans label et total, plus un CSV |
+| `mailsort run --dry-run [--limit N \| --all] [--query …] [--no-review]` | Classe sans rien modifier dans Gmail : mails 🤔 To Review avec doutes et scores, bilan par label, sans label et total, décompte des doutes, plus un CSV |
 | `mailsort resort --all` | Repose toutes les questions sur tous les mails |
 | `mailsort eval` | Compare le classement aux labels existants |
 | `mailsort messages [--query …] [--limit N]` | Liste les derniers mails (identifiant, date, expéditeur, objet), en lecture seule |

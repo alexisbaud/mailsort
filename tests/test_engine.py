@@ -1,7 +1,9 @@
 """Tests du moteur de décision, sur le vrai labels.yaml.
 
 Types : payments, deliveries, tickets_bookings, official_documents, accounts_security,
-newsletters, marketing. Paires interdites : payments/deliveries, newsletters/marketing.
+newsletters, marketing, support, subscriptions_services. Paires interdites : payments/deliveries,
+newsletters/marketing, subscriptions_services/payments.
+Seuils oui/non : domaines 0.70, deletable 0.55, to_reply 0.80 ; zone de doute à partir de 0.50.
 Protègent de deletable : payments, tickets_bookings, official_documents, family_friends, to_reply.
 """
 
@@ -91,7 +93,7 @@ def test_none_of_the_above_gives_no_type():
 
 
 def test_primary_below_threshold_goes_to_review():
-    d = run(primary(payments=0.55, deliveries=0.25))
+    d = run(primary(payments=0.55, deliveries=0.15))
     assert d.primary_type is None
     assert "payments" not in d.labels
     assert REVIEW in d.labels
@@ -99,14 +101,40 @@ def test_primary_below_threshold_goes_to_review():
     assert any("type incertain" in r for r in d.review_reasons)
 
 
-def test_uncertain_none_of_the_above_goes_to_review():
+def test_type_pair_sum_posts_the_winner():
+    d = run(primary(payments=0.55, official_documents=0.44))
+    assert d.primary_type == "payments"
+    assert d.doubts == ()
+
+
+def test_type_pair_sum_is_inclusive():
+    assert run(primary(payments=0.5, official_documents=0.3)).primary_type == "payments"
+    assert run(primary(payments=0.5, official_documents=0.29)).primary_type is None
+
+
+def test_none_as_runner_up_does_not_count_for_pair_sum():
+    d = run(primary(payments=0.5, **{NONE_OPTION: 0.45}))
+    assert d.primary_type is None
+    assert d.doubts[0].family == "type"
+
+
+def test_none_winning_with_pair_sum_gives_no_type():
+    d = run(primary(payments=0.4, **{NONE_OPTION: 0.5}))
+    assert d.primary_type is None
+    assert d.labels == {REVIEW}
+
+
+def test_uncertain_type_with_domain_is_not_in_review():
     d = run(primary(payments=0.40, **{NONE_OPTION: 0.45}), yes_no(housing=0.9))
     assert d.primary_type is None
-    assert REVIEW in d.labels
+    assert d.labels == {"housing"}
+    assert any("type incertain" in r for r in d.review_reasons)
 
 
 def test_tie_resolved_by_file_order():
     d = run(primary(payments=0.5, deliveries=0.5))
+    assert d.primary_type == "payments"
+    d = run(primary(payments=0.35, deliveries=0.35))
     assert d.doubts[0].label_id == "payments"
 
 
@@ -146,7 +174,13 @@ def test_no_secondary_request_for_forbidden_pair(probs):
 
 
 def test_no_secondary_request_when_primary_uncertain():
-    assert secondary_request(CONFIG, primary(payments=0.55, official_documents=0.4)) is None
+    assert secondary_request(CONFIG, primary(payments=0.45, official_documents=0.3)) is None
+
+
+def test_secondary_request_after_pair_sum():
+    request = secondary_request(CONFIG, primary(payments=0.55, official_documents=0.44))
+    assert request is not None
+    assert request.candidate == "official_documents"
 
 
 def test_no_secondary_request_when_none_wins():
@@ -233,7 +267,7 @@ def test_label_specific_threshold(tmp_path):
     config = config_with(tmp_path, lambda raw: raw_label(raw, "housing").update(threshold=0.9))
     d = run(yn=yes_no(housing=0.85), config=config)
     assert "housing" not in d.labels
-    assert REVIEW in d.labels
+    assert d.doubts[0].label_id == "housing"
     assert run(yn=yes_no(housing=0.9), config=config).labels == {"payments", "housing"}
 
 
@@ -303,16 +337,39 @@ def test_to_reply_removed_no_longer_protects():
 # ------------------------------------------------------ 7. zone de doute
 
 
-def test_yes_no_doubt_goes_to_review():
+def test_yes_no_doubt_is_noted_but_not_in_review():
     d = run(yn=yes_no(housing=0.65))
-    assert "housing" not in d.labels
-    assert REVIEW in d.labels
+    assert d.labels == {"payments"}
     assert d.doubts[0].label_id == "housing"
     assert d.review_reasons == ("doute sur housing (0.65)",)
+    assert d.no_landmark is False
 
 
 def test_doubt_lower_bound_is_inclusive():
-    assert REVIEW in run(yn=yes_no(housing=0.5)).labels
+    assert run(yn=yes_no(housing=0.5)).doubts[0].label_id == "housing"
+    assert run(yn=yes_no(housing=0.49)).doubts == ()
+
+
+def test_doubt_without_landmark_goes_to_review():
+    d = run(primary(), yes_no(housing=0.65))
+    assert d.labels == {REVIEW}
+    assert d.review_reasons == (
+        "doute sur housing (0.65)",
+        "aucun repère : ni type, ni domaine, ni nettoyage",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label_id", "below", "at"),
+    [("housing", 0.69, 0.70), ("deletable", 0.54, 0.55), ("to_reply", 0.79, 0.80)],
+)
+def test_family_and_label_thresholds(label_id, below, at):
+    assert label_id not in run(primary(marketing=0.9), yes_no(**{label_id: below})).labels
+    assert label_id in run(primary(marketing=0.9), yes_no(**{label_id: at})).labels
+
+
+def test_subscriptions_never_with_payments():
+    assert secondary_request(CONFIG, primary(subscriptions_services=0.62, payments=0.33)) is None
 
 
 # ---------------------------------------------------- 8. mail sans repère
@@ -369,16 +426,17 @@ def test_lock_on_doubtful_label_is_not_a_doubt():
 def test_lock_in_same_family_resolves_doubt():
     d = run(yn=yes_no(housing=0.65), locks={"work": True})
     assert REVIEW not in d.labels
+    assert d.doubts == ()
     assert d.labels == {"payments", "work"}
 
 
 def test_lock_in_other_family_does_not_resolve_doubt():
     d = run(yn=yes_no(housing=0.65), locks={"to_reply": True})
-    assert REVIEW in d.labels
+    assert [doubt.label_id for doubt in d.doubts] == ["housing"]
 
 
 def test_type_lock_resolves_type_doubt():
-    d = run(primary(payments=0.55, deliveries=0.25), locks={"deliveries": True})
+    d = run(primary(payments=0.45, deliveries=0.25), locks={"deliveries": True})
     assert d.labels == {"deliveries"}
     assert REVIEW not in d.labels
 
@@ -467,3 +525,8 @@ def test_missing_yes_no_is_an_error():
 def test_probability_out_of_range_is_an_error(value):
     with pytest.raises(EngineError, match="hors de"):
         run(yn=yes_no(housing=value))
+
+
+def test_no_landmark_flag():
+    assert run(primary()).no_landmark is True
+    assert run(primary(newsletters=0.9)).no_landmark is False

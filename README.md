@@ -52,6 +52,11 @@ combien de mails iraient dans chaque label, combien n'en auraient aucun, et le t
 (détail par mail dans un CSV). Par défaut sur les 200 derniers mails ; `--all` pour toute la
 boîte, `--limit N` ou `--query "…"` pour un autre périmètre.
 
+Il liste aussi chaque mail qui irait dans 🤔 To Review, avec ses scores et la raison, puis compte
+les mails par raison (`--no-review` masque la liste). Les réponses de Jev sont gardées dans
+`mailsort.db` : après un changement de seuil dans `labels.yaml`, relancer la commande ne rappelle
+pas Jev et ne coûte rien.
+
 ```bash
 uv run mailsort run --dry-run
 ```

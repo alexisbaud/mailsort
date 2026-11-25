@@ -3,15 +3,16 @@
 Tout est pur : aucune entrée-sortie, aucun appel réseau. Les règles sont celles de la section
 « Règles de décision » de la spec, appliquées dans cet ordre :
 
-1. type principal ;
+1. type principal : posé s'il atteint `primary_min`, ou si, avec un autre type en deuxième
+   position, la somme des deux atteint `primary_pair_sum` ;
 2. type secondaire (second passage) ;
 3. paires interdites ;
 4. labels oui/non ;
 5. règle « déjà répondu » (✉️ To Reply) ;
 6. verrous manuels (la correction d'Alexis l'emporte toujours) ;
 7. protections (`protects_from`) ;
-8. zone de doute et mail sans repère → 🤔 To Review, sauf si une correction manuelle a déjà
-   tranché la famille concernée.
+8. 🤔 To Review seulement pour un mail sans repère (ni type, ni domaine, ni nettoyage). Les
+   doutes (score dans la zone de doute) ne posent pas le label et sont seulement notés.
 
 Le programme appelle d'abord `secondary_request` pour savoir s'il faut un second passage des
 types, puis `decide` avec toutes les réponses de Jev.
@@ -80,7 +81,10 @@ class Decision:
     blocked: frozenset[str]
     """Labels qui auraient été posés sans une protection."""
     review_reasons: tuple[str, ...]
-    """Pourquoi 🤔 To Review est demandé (vide sinon), en clair pour le journal et `explain`."""
+    """Doutes et absence de repère, en clair pour le journal, `explain` et le CSV. Seule
+    l'absence de repère pose 🤔 To Review : un mail peut avoir des doutes sans y aller."""
+    no_landmark: bool = False
+    """Aucun type, domaine ni nettoyage n'est posé (et aucune correction ne l'a tranché)."""
 
 
 # --------------------------------------------------------------------- outils
@@ -117,22 +121,45 @@ def _type_options(config: Config) -> tuple[str, ...]:
     return tuple(t.id for t in config.types) + (NONE_OPTION,)
 
 
+def primary_confident(config: Config, primary: Mapping[str, float]) -> bool:
+    """Le type gagnant est assez sûr pour être posé (règle 1).
+
+    Il l'est s'il atteint `primary_min`, ou si les deux premières options sont des types et que
+    leurs probabilités cumulées atteignent `primary_pair_sum` : Jev partage alors sa certitude
+    entre deux types (par exemple une quittance, à la fois paiement et document officiel).
+    Avec « None of the above » en première ou deuxième position, seul `primary_min` compte :
+    le partage traduit alors un doute sur le type, pas un mail qui relève de deux types.
+    """
+    options = _type_options(config)
+    settings = config.settings.types
+    ranked = sorted(options, key=lambda o: (-primary[o], options.index(o)))
+    best = primary[ranked[0]]
+    if best >= settings.primary_min:
+        return True
+    pair = ranked[:2]
+    return (
+        len(pair) == 2
+        and NONE_OPTION not in pair
+        and best + primary[pair[1]] >= settings.primary_pair_sum
+    )
+
+
 # ------------------------------------------------------------ second passage
 
 
 def secondary_request(config: Config, primary: Mapping[str, float]) -> SecondaryRequest | None:
     """Indique s'il faut reposer la question des types sans le gagnant (règles 2 et 3).
 
-    Pas de second passage si le gagnant est « None of the above » ou sous `primary_min`, si aucun
-    autre type n'atteint `secondary_trigger`, ou si ce type forme une paire interdite avec le
-    gagnant (il ne pourrait de toute façon pas être posé).
+    Pas de second passage si le gagnant est « None of the above » ou n'est pas posé (règle 1), si
+    aucun autre type n'atteint `secondary_trigger`, ou si ce type forme une paire interdite avec
+    le gagnant (il ne pourrait de toute façon pas être posé).
     """
     options = _type_options(config)
     _check_options("primary", primary, options)
     settings = config.settings.types
 
-    winner, probability = _winner(primary, options)
-    if winner == NONE_OPTION or probability < settings.primary_min:
+    winner, _ = _winner(primary, options)
+    if winner == NONE_OPTION or not primary_confident(config, primary):
         return None
 
     candidates = [
@@ -179,7 +206,7 @@ def decide(
     computed: set[str] = set()
     doubts: list[Doubt] = []
     primary_type: str | None = None
-    if winner_probability < settings.types.primary_min:
+    if not primary_confident(config, answers.primary):
         doubts.append(Doubt("type", winner, winner_probability))
     elif winner != NONE_OPTION:
         primary_type = winner
@@ -239,22 +266,23 @@ def decide(
         doubts.append(doubt)
 
     locked_families = {by_id[i].family for i in locks if i in by_id}
+    # Une correction manuelle sur un label d'une famille tranche les doutes de cette famille.
+    doubts = [d for d in doubts if d.family not in locked_families]
     reasons: list[str] = []
     for doubt in doubts:
-        if doubt.family in locked_families:
-            continue  # une correction manuelle a tranché cette famille
         if doubt.family == "type":
             reasons.append(f"type incertain ({doubt.label_id} à {doubt.probability:.2f})")
         else:
             reasons.append(f"doute sur {doubt.label_id} ({doubt.probability:.2f})")
 
     has_landmark = any(by_id[i].family in LANDMARK_FAMILIES for i in final)
-    if not has_landmark and not (locked_families & LANDMARK_FAMILIES):
+    no_landmark = not has_landmark and not (locked_families & LANDMARK_FAMILIES)
+    if no_landmark:
         reasons.append("aucun repère : ni type, ni domaine, ni nettoyage")
 
     review = by_id.get(REVIEW_LABEL_ID)
     if review is not None and review.enabled:
-        wants_review = bool(reasons)
+        wants_review = no_landmark
         if REVIEW_LABEL_ID in locks:
             wants_review = locks[REVIEW_LABEL_ID]
         if wants_review:
@@ -267,4 +295,5 @@ def decide(
         doubts=tuple(doubts),
         blocked=frozenset(blocked),
         review_reasons=tuple(reasons),
+        no_landmark=no_landmark,
     )

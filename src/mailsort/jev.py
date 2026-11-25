@@ -36,8 +36,12 @@ DEFAULT_MAX_REQUESTS_PER_SECOND = 10.0
 PRICE_PER_MILLION_INPUT_TOKENS = 0.042
 """En dollars ; les tokens de sortie sont gratuits."""
 
-PROMPT_VERSION = 1
-"""À incrémenter quand le texte des consignes change : les questions seront reposées."""
+PROMPT_VERSION = 2
+"""À incrémenter quand le texte des consignes ou la forme de l'état change : les questions seront
+reposées. Version 2 : nom de l'utilisateur en tête de l'état."""
+
+USER_LINE = "{name} (the owner of this mailbox)"
+"""Valeur de la clé `user`, placée en tête de l'état quand `settings.user` est renseigné."""
 
 NONE_CHOICE = "none_of_the_above"
 """Nom de l'option « None of the above » envoyé à Jev (`NONE_OPTION` dans le reste du code)."""
@@ -238,12 +242,22 @@ def yes_no_question(label: Label) -> dict[str, Any]:
 def stored_fingerprints(config: Config, model: str) -> dict[str, str]:
     """Empreinte enregistrée pour chaque question : celle de la configuration, plus la version
     de Jev et celle des consignes. Changer l'une d'elles fait reposer la question."""
+    user = config.settings.user.full_name if config.settings.user else None
     return {
         question: hashlib.sha256(
-            json.dumps([fingerprint, model, PROMPT_VERSION]).encode()
+            json.dumps([fingerprint, model, PROMPT_VERSION, user]).encode()
         ).hexdigest()[:16]
         for question, fingerprint in config.question_fingerprints().items()
     }
+
+
+def with_user(config: Config, state: Mapping[str, Any]) -> dict[str, Any]:
+    """L'état avec, en tête, qui est l'utilisateur : Jev reconnaît ainsi un proche qui porte le
+    même nom de famille. Le nom vient de `settings.user.full_name`."""
+    if config.settings.user is None:
+        return dict(state)
+    line = USER_LINE.format(name=config.settings.user.full_name)
+    return {"user": line, **{k: v for k, v in state.items() if k != "user"}}
 
 
 def _choice_probabilities(
@@ -291,7 +305,7 @@ def ask(
     if not payload:
         return AskResult({}, client.model, 0)
 
-    response = client.system_one(state, payload)
+    response = client.system_one(with_user(config, state), payload)
     type_options = [t.id for t in config.types] + [NONE_OPTION]
     probabilities: dict[str, dict[str, float]] = {}
     for question in payload:
@@ -310,7 +324,9 @@ def ask_secondary(
 ) -> AskResult:
     """Second passage des types, sans le type gagnant."""
     question = SECONDARY_TYPE_QUESTION
-    response = client.system_one(state, {question: type_question(config, exclude=request.winner)})
+    response = client.system_one(
+        with_user(config, state), {question: type_question(config, exclude=request.winner)}
+    )
     answer = response.answers.get(question)
     if answer is None:
         raise JevError(f"Pas de réponse pour « {question} »")

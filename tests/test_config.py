@@ -14,6 +14,7 @@ MINIMAL = {
     "settings": {
         "types": {
             "primary_min": 0.6,
+            "primary_pair_sum": 0.8,
             "secondary_trigger": 0.3,
             "secondary_min": 0.7,
             "none_description": "None of the other types applies.",
@@ -93,7 +94,7 @@ def errors_for(tmp_path: Path, d: dict) -> list[str]:
 
 def test_repo_labels_file_is_valid():
     cfg = load_config(REPO_LABELS)
-    assert len(cfg.labels) == 18
+    assert len(cfg.labels) == 20
     assert [t.id for t in cfg.types] == [
         "payments",
         "deliveries",
@@ -102,8 +103,13 @@ def test_repo_labels_file_is_valid():
         "accounts_security",
         "newsletters",
         "marketing",
+        "support",
+        "subscriptions_services",
     ]
     assert len(cfg.yes_no_labels) == 10
+    assert cfg.settings.user is not None
+    assert cfg.settings.user.full_name == "Alexis Baud"
+    assert cfg.by_id["subscriptions_services"].never_with == ("payments",)
     assert cfg.full_name(cfg.by_id["payments"]) == "Types/💳 Payments"
     assert cfg.full_name(cfg.by_id["to_review"]) == "Actions/🤔 To Review"
     assert cfg.by_id["payments"].never_with == ("deliveries",)
@@ -360,8 +366,18 @@ def test_reformatting_description_keeps_fingerprint(tmp_path):
         lambda d: d["settings"]["types"].__setitem__("primary_min", 0.65),
         lambda d: label(d, "deliveries").__setitem__("protects_from", ["deletable"]),
         lambda d: label(d, "payments").__setitem__("never_with", []),
+        lambda d: d["settings"]["types"].__setitem__("primary_pair_sum", 0.85),
+        lambda d: d["settings"].__setitem__("yes_no_min_by_family", {"domain": 0.7}),
     ],
-    ids=["label_threshold", "yes_no_min", "primary_min", "protects_from", "never_with"],
+    ids=[
+        "label_threshold",
+        "yes_no_min",
+        "primary_min",
+        "protects_from",
+        "never_with",
+        "primary_pair_sum",
+        "yes_no_min_by_family",
+    ],
 )
 def test_rule_changes_only_affect_rules_fingerprint(tmp_path, change):
     questions_before, rules_before = fingerprints(tmp_path, data())
@@ -403,7 +419,7 @@ runner = CliRunner()
 def test_cli_labels_check_ok():
     result = runner.invoke(app, ["labels", "check", "--config", str(REPO_LABELS)])
     assert result.exit_code == 0, result.output
-    assert "18 labels" in result.output
+    assert "20 labels" in result.output
 
 
 def test_cli_labels_check_reports_errors(tmp_path):
@@ -412,3 +428,30 @@ def test_cli_labels_check_reports_errors(tmp_path):
     result = runner.invoke(app, ["labels", "check", "--config", str(write(tmp_path, d))])
     assert result.exit_code == 1
     assert "deliverys" in result.output
+
+
+def test_family_threshold_applies_unless_label_has_its_own(tmp_path):
+    d = data()
+    d["settings"]["yes_no_min_by_family"] = {"domain": 0.7}
+    d["labels"].insert(3, {**label(d, "housing"), "id": "banking", "name": "Banking"})
+    label(d, "banking")["threshold"] = 0.9
+    cfg = load_config(write(tmp_path, d))
+    assert cfg.threshold_for(cfg.by_id["housing"]) == 0.7
+    assert cfg.threshold_for(cfg.by_id["banking"]) == 0.9
+    assert cfg.threshold_for(cfg.by_id["deletable"]) == 0.8
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda d: d["settings"].__setitem__("yes_no_min_by_family", {"domain": 0.5}), "domain"),
+        (lambda d: d["settings"].__setitem__("yes_no_min_by_family", {"type": 0.7}), "type"),
+        (lambda d: d["settings"]["types"].__setitem__("primary_pair_sum", 0.5), "pair_sum"),
+        (lambda d: d["settings"].__setitem__("user", {"full_name": ""}), "full_name"),
+    ],
+    ids=["family_below_doubt", "family_not_yes_no", "pair_below_min", "empty_name"],
+)
+def test_new_settings_are_validated(tmp_path, mutate, expected):
+    d = data()
+    mutate(d)
+    assert any(expected in e for e in errors_for(tmp_path, d))

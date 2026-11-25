@@ -14,10 +14,11 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
-from mailsort.config import SECONDARY_TYPE_QUESTION, TYPE_QUESTION, Config
+from mailsort.config import REVIEW_LABEL_ID, SECONDARY_TYPE_QUESTION, TYPE_QUESTION, Config
 from mailsort.db import Database
 from mailsort.engine import NONE_OPTION, Decision, decide, secondary_request
 from mailsort.gmail import Gmail, GmailAuthError, GmailError, GmailMessage, ThreadInfo, is_excluded
@@ -63,6 +64,31 @@ class Row:
     subject: str
     decision: Decision
     probabilities: dict[str, dict[str, float]]
+
+    @property
+    def in_review(self) -> bool:
+        return REVIEW_LABEL_ID in self.decision.labels
+
+    @property
+    def short_date(self) -> str:
+        try:
+            return parsedate_to_datetime(self.date).strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            return self.date[:16]
+
+
+@dataclass(frozen=True)
+class Note:
+    """Un doute ou l'absence de repère pour un mail, avec les scores utiles."""
+
+    key: str
+    """`type`, `doubt:<id du label>` ou `no_landmark` : sert à regrouper les mails."""
+    detail: str
+    """En clair, avec les scores et les seuils."""
+
+
+NO_LANDMARK = "no_landmark"
+TYPE_DOUBT = "type"
 
 
 class DryRun:
@@ -234,7 +260,7 @@ class DryRun:
         yes_no = [label.id for label in config.yes_no_labels]
         order = {label.id: i for i, label in enumerate(config.labels)}
         columns = (
-            ["message_id", "date", "from", "subject", "labels", "review_reasons"]
+            ["message_id", "date", "from", "subject", "labels", "review_reasons", "to_review"]
             + [f"type:{o}" for o in type_options]
             + ["secondary"]
             + yes_no
@@ -254,11 +280,106 @@ class DryRun:
                         row.subject,
                         " ".join(config.by_id[i].name for i in labels),
                         " | ".join(row.decision.review_reasons),
+                        "yes" if row.in_review else "no",
                         *(f"{primary.get(o, 0):.3f}" for o in type_options),
                         " ".join(f"{k}={v:.2f}" for k, v in (secondary or {}).items()),
                         *(f"{row.probabilities[q]['yes']:.3f}" for q in yes_no),
                     ]
                 )
+
+
+# ------------------------------------------------------------- 🤔 To Review
+
+
+def _option_name(config: Config, option: str) -> str:
+    return "aucun type" if option == NONE_OPTION else config.by_id[option].name
+
+
+def _top(scores: dict[str, float], count: int) -> list[tuple[str, float]]:
+    return sorted(scores.items(), key=lambda item: -item[1])[:count]
+
+
+def mail_notes(config: Config, row: Row) -> list[Note]:
+    """Doutes du mail et, s'il n'a aucun repère, ce qui s'en approchait le plus.
+
+    Seule l'absence de repère envoie le mail en 🤔 To Review ; un doute laisse simplement le
+    label non posé.
+    """
+    types_settings = config.settings.types
+    types = row.probabilities[TYPE_QUESTION]
+    notes = []
+    for doubt in row.decision.doubts:
+        if doubt.family == "type":
+            ranking = " · ".join(f"{_option_name(config, o)} {p:.2f}" for o, p in _top(types, 3))
+            notes.append(
+                Note(
+                    TYPE_DOUBT,
+                    f"type incertain : {ranking} (seuil {types_settings.primary_min:.2f}, "
+                    f"ou {types_settings.primary_pair_sum:.2f} pour deux types)",
+                )
+            )
+        else:
+            label = config.by_id[doubt.label_id]
+            notes.append(
+                Note(
+                    f"doubt:{label.id}",
+                    f"doute sur {label.name} : {doubt.probability:.2f} "
+                    f"(posé à partir de {config.threshold_for(label):.2f})",
+                )
+            )
+    if row.decision.no_landmark:
+        best, best_p = _top(types, 1)[0]
+        landmarks = {
+            label.id: row.probabilities[label.id]["yes"]
+            for label in config.yes_no_labels
+            if label.family in ("domain", "cleanup")
+        }
+        near = " · ".join(f"{config.by_id[i].name} {p:.2f}" for i, p in _top(landmarks, 3))
+        notes.append(
+            Note(
+                NO_LANDMARK,
+                f"aucun repère : meilleur type {_option_name(config, best)} {best_p:.2f} ; "
+                f"meilleurs domaines/nettoyage {near}",
+            )
+        )
+    return notes
+
+
+def note_title(config: Config, key: str) -> str:
+    """Intitulé d'un groupe de notes, avec le seuil en jeu."""
+    settings = config.settings
+    if key == TYPE_DOUBT:
+        return (
+            f"Type incertain (sous {settings.types.primary_min:.2f}, "
+            f"ni deux types à {settings.types.primary_pair_sum:.2f})"
+        )
+    if key == NO_LANDMARK:
+        return "Aucun repère (ni type, ni domaine, ni nettoyage)"
+    label = config.by_id[key.removeprefix("doubt:")]
+    return (
+        f"Doute sur {label.name} "
+        f"({settings.doubt_min:.2f} ≤ score < {config.threshold_for(label):.2f})"
+    )
+
+
+@dataclass(frozen=True)
+class NoteCount:
+    key: str
+    mails: int
+    in_review: int
+    """Parmi ces mails, ceux qui partent en 🤔 To Review (faute de repère)."""
+
+
+def notes_summary(config: Config, rows: Iterable[Row]) -> list[NoteCount]:
+    """Nombre de mails par doute ou absence de repère, du plus fréquent au moins fréquent."""
+    mails: Counter[str] = Counter()
+    in_review: Counter[str] = Counter()
+    for row in rows:
+        keys = {note.key for note in mail_notes(config, row)}
+        mails.update(keys)
+        if row.in_review:
+            in_review.update(keys)
+    return [NoteCount(key, count, in_review[key]) for key, count in mails.most_common()]
 
 
 def default_csv_path(now: datetime | None = None) -> Path:

@@ -209,3 +209,65 @@ def test_csv(db, tmp_path):
     assert contract["housing"] == "0.900"
     nothing = next(r for r in rows if r["subject"] == "Rien")
     assert "aucun repère" in nothing["review_reasons"]
+
+
+def test_notes_and_summary(db, tmp_path):
+    from mailsort.sorter import mail_notes, notes_summary
+
+    scripts = dict(SCRIPTS)
+    scripts["Doute"] = {
+        "choices": {TYPE_QUESTION: {"payments": 0.45, "deliveries": 0.3, NONE_CHOICE: 0.25}},
+        "nouls": {"housing": 0.65, "administration": 0.4},
+    }
+    scripts["Reçu"] = {
+        "choices": {TYPE_QUESTION: {"payments": 0.9, NONE_CHOICE: 0.1}},
+        "nouls": {"banking": 0.6},
+    }
+    service = mailbox(
+        messages={
+            "m6": gmail_message("m6", "t6", Subject="Doute"),
+            "m7": gmail_message("m7", "t7", Subject="Reçu"),
+        },
+        threads={"t7": {"messages": [{"labelIds": ["INBOX"], "internalDate": "1"}]}},
+    )
+    runner, report = dry_run(service, FakeJev(by_subject=scripts), db)
+    rows = {row.subject: row for row in runner.rows}
+
+    assert mail_notes(CONFIG, rows["Facture"]) == []
+    (nothing,) = mail_notes(CONFIG, rows["Rien"])
+    assert nothing.key == "no_landmark"
+    assert "meilleur type aucun type 1.00" in nothing.detail
+
+    doubt = mail_notes(CONFIG, rows["Doute"])
+    assert [n.key for n in doubt] == ["type", "doubt:housing", "no_landmark"]
+    assert "💳 Payments 0.45 · 📦 Deliveries 0.30 · aucun type 0.25" in doubt[0].detail
+    assert "🏠 Housing : 0.65 (posé à partir de 0.70)" in doubt[1].detail
+    assert "🏠 Housing 0.65 · 🏛️ Administration 0.40" in doubt[2].detail
+
+    # Un doute sur un mail qui a un repère ne l'envoie pas en 🤔 To Review.
+    assert [n.key for n in mail_notes(CONFIG, rows["Reçu"])] == ["doubt:banking"]
+    assert not rows["Reçu"].in_review
+    assert report.label_counts["to_review"] == 2
+
+    summary = {c.key: (c.mails, c.in_review) for c in notes_summary(CONFIG, runner.rows)}
+    assert summary == {
+        "no_landmark": (2, 2),
+        "type": (1, 1),
+        "doubt:housing": (1, 1),
+        "doubt:banking": (1, 0),
+    }
+
+    path = tmp_path / "out.csv"
+    runner.write_csv(path)
+    by_subject = {r["subject"]: r for r in csv.DictReader(path.open(encoding="utf-8"))}
+    assert by_subject["Reçu"]["review_reasons"] == "doute sur banking (0.60)"
+    assert by_subject["Reçu"]["to_review"] == "no"
+    assert by_subject["Doute"]["to_review"] == "yes"
+
+
+def test_user_name_is_sent_first(db):
+    fake = FakeJev(by_subject=SCRIPTS)
+    dry_run(mailbox(), fake, db)
+    state = fake.requests[0]["state"]
+    assert next(iter(state)) == "user"
+    assert state["user"] == "Alexis Baud (the owner of this mailbox)"

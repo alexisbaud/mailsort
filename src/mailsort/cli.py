@@ -30,7 +30,16 @@ from mailsort.config import (
 from mailsort.db import Database
 from mailsort.engine import NONE_OPTION
 from mailsort.prepare import MailSummary, summarize, summarize_message
-from mailsort.sorter import TOKENS_PER_MAIL_ESTIMATE, DryRun, DryRunReport, default_csv_path
+from mailsort.sorter import (
+    TOKENS_PER_MAIL_ESTIMATE,
+    DryRun,
+    DryRunReport,
+    Row,
+    default_csv_path,
+    mail_notes,
+    note_title,
+    notes_summary,
+)
 
 ConfigPath = Annotated[
     Path,
@@ -174,6 +183,13 @@ def run(
         str, typer.Option("--query", "-q", help="Recherche Gmail pour restreindre les mails.")
     ] = gmail.DEFAULT_QUERY,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Ne pas demander confirmation.")] = False,
+    review: Annotated[
+        bool,
+        typer.Option(
+            "--review/--no-review",
+            help="Passage à blanc : lister les mails 🤔 To Review avec leurs scores et la raison.",
+        ),
+    ] = True,
     config: ConfigPath = Path("labels.yaml"),
 ) -> None:
     """Passage de tri : nouveaux mails et labels modifiés."""
@@ -209,10 +225,35 @@ def run(
 
     csv_path = default_csv_path()
     dry.write_csv(csv_path)
-    _print_dry_run(cfg, report, csv_path)
+    if review:
+        _print_review_list(cfg, dry.rows)
+    _print_dry_run(cfg, report)
+    _print_notes_summary(cfg, dry.rows)
+    typer.echo(f"\nDétail par mail : {csv_path}")
 
 
-def _print_dry_run(cfg: Config, report: DryRunReport, csv_path: Path) -> None:
+def _print_review_list(cfg: Config, rows: list[Row]) -> None:
+    """Un bloc par mail 🤔 To Review (sans repère), avec ses doutes ; les mails aux doutes
+    semblables se suivent."""
+    rank = {count.key: i for i, count in enumerate(notes_summary(cfg, rows))}
+    entries = [(row, mail_notes(cfg, row)) for row in rows if row.in_review]
+    if not entries:
+        return
+    entries.sort(key=lambda e: (sorted(rank[c.key] for c in e[1]), e[0].date))
+    order = list(cfg.by_id)
+    typer.echo(f"\nMails 🤔 To Review ({len(entries)})")
+    for row, notes in entries:
+        sender = row.sender if len(row.sender) <= 40 else row.sender[:39] + "…"
+        typer.echo(f"\n  {row.message_id}  {row.short_date}  {sender}")
+        typer.echo(f"    Objet  : {row.subject or '(sans objet)'}")
+        others = [i for i in sorted(row.decision.labels, key=order.index) if i != "to_review"]
+        names = ", ".join(cfg.by_id[i].name for i in others) or "aucun autre label"
+        typer.echo(f"    Labels : {names}")
+        for note in notes:
+            typer.echo(f"    • {note.detail}")
+
+
+def _print_dry_run(cfg: Config, report: DryRunReport) -> None:
     total = report.total
 
     def share(count: int) -> str:
@@ -258,7 +299,19 @@ def _print_dry_run(cfg: Config, report: DryRunReport, csv_path: Path) -> None:
         typer.echo(f"Erreur sur {message_id} : {error}", err=True)
     if len(report.errors) > 5:
         typer.echo(f"… et {len(report.errors) - 5} autre(s) erreur(s).", err=True)
-    typer.echo(f"\nDétail par mail : {csv_path}")
+
+
+def _print_notes_summary(cfg: Config, rows: list[Row]) -> None:
+    summary = notes_summary(cfg, rows)
+    if not summary:
+        return
+    typer.echo("\nDoutes et absence de repère                           mails  dont To Review")
+    for count in summary:
+        typer.echo(f"  {note_title(cfg, count.key):<51} {count.mails:>5}  {count.in_review:>8}")
+    typer.echo(
+        "Un doute laisse seulement le label non posé ; seule l'absence de repère envoie en "
+        "🤔 To Review."
+    )
 
 
 @app.command()
@@ -385,7 +438,9 @@ def _print_classification(cfg: Config, summary: MailSummary, result: jev.Classif
     )
 
     types = cfg.settings.types
-    typer.echo(f"\nType (seuil {types.primary_min:.2f})")
+    typer.echo(
+        f"\nType (seuil {types.primary_min:.2f}, ou {types.primary_pair_sum:.2f} pour deux types)"
+    )
     for option, probability in sorted(
         result.probabilities[TYPE_QUESTION].items(), key=lambda item: -item[1]
     ):
@@ -423,8 +478,12 @@ def _print_classification(cfg: Config, summary: MailSummary, result: jev.Classif
     if decision.blocked:
         blocked = ", ".join(by_id[i].name for i in sorted(decision.blocked))
         typer.echo(f"Bloqués par une protection : {blocked}")
-    for reason in decision.review_reasons:
-        typer.echo(f"🤔 {reason}")
+    reasons = list(decision.review_reasons)
+    landmark = reasons.pop() if decision.no_landmark else None
+    for reason in reasons:
+        typer.echo(f"Doute, label non posé : {reason}")
+    if landmark is not None:
+        typer.echo(f"🤔 To Review : {landmark}")
 
 
 @app.command()

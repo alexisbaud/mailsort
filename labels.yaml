@@ -10,16 +10,22 @@
 settings:
   types:
     primary_min: 0.60        # seuil du type principal
+    primary_pair_sum: 0.80   # ou : somme des deux premiers types (mail qui relève de deux types)
     secondary_trigger: 0.30  # déclenche le second passage
     secondary_min: 0.70      # seuil du type secondaire
     none_description: >
       None of the other types applies. This email is not a proof of payment
       or refund, not the tracking of a shipment, return or download, not a
       ticket or booking, not an official or contractual document, not an
-      account or security notification, not a newsletter, digest or
-      changelog, and not a promotional or marketing message.
-  yes_no_min: 0.80           # seuil par défaut des questions oui/non
-  doubt_min: 0.50            # en dessous : non ; entre les deux : To Review
+      account or security notification, not a subscription or service notice,
+      not a customer support exchange, not a newsletter, digest or changelog,
+      and not a promotional or marketing message.
+  user:
+    full_name: "Alexis Baud"   # donné à Jev en tête de chaque mail
+  yes_no_min: 0.80           # seuil par défaut des questions oui/non (To Reply)
+  yes_no_min_by_family:      # seuil d'une famille, à la place de yes_no_min
+    domain: 0.70
+  doubt_min: 0.50            # entre doubt_min et le seuil : doute noté, label non posé
   parents:                   # label parent Gmail de chaque famille
     type: Types
     domain: Domains
@@ -42,11 +48,12 @@ labels:
     never_with: [deliveries]
     protects_from: [deletable]
     description: >
-      Proof that the user paid for something or was refunded: invoices,
-      receipts, paid order confirmations (including free orders), payment
-      confirmations, rent receipts, charged subscription renewals, refunds.
-      Not: payment reminders before paying, failed payments, quotes, price
-      change announcements, money received by the user.
+      Proof that money actually moved for the user: invoices, receipts, paid
+      order confirmations (including free orders), payment confirmations,
+      rent receipts, charged subscription renewals, refunds. Not: upcoming
+      charges, renewal or expiry reminders, failed or declined payments,
+      payment method problems, quotes, price or fee change announcements,
+      money received by the user, shipping or delivery updates.
 
   - id: deliveries
     name: "📦 Deliveries"
@@ -54,9 +61,11 @@ labels:
     color: "#ff7537"
     description: >
       Tracking of something the user ordered or obtained until it reaches
-      them: shipping, tracking, delivery, pickup points, returns and
-      exchanges, a device sent for repair, a file or resource made available
-      for download, even if free.
+      them: shipping, tracking, delivery, pickup points and pickup
+      appointments, returns and exchanges, a device sent for repair, a file
+      or resource made available for download, even if free. Not: the order
+      or payment confirmation itself, promotions about delivery offers,
+      customer service replies about an order.
 
   - id: tickets_bookings
     name: "🎟️ Tickets & Bookings"
@@ -67,7 +76,9 @@ labels:
       An access ticket or reservation tied to a date or place: transport
       tickets, show or event tickets, boarding passes, accommodation,
       restaurant or appointment bookings, event registrations, and changes or
-      cancellations to them.
+      cancellations to them. Not: travel or event promotions and discount
+      codes, review requests after a trip, subscriptions to a mobility
+      service, generic reminders with no specific reservation.
 
   - id: official_documents
     name: "📄 Official Documents"
@@ -77,17 +88,23 @@ labels:
     description: >
       A document with administrative, contractual or legal value worth
       keeping: contracts, certificates, attestations, payslips, tax notices,
-      official statements, summons, electronically signed documents.
+      official statements, summons, electronically signed documents. Not:
+      newsletters or general information from an administration, terms of
+      use or privacy policy updates, simple receipts for a purchase,
+      verification codes.
 
   - id: accounts_security
     name: "🔐 Accounts & Security"
     family: type
     color: "#757575"
     description: >
-      Management of one of the user's online accounts: account creation,
-      email verification, login or verification codes, password resets,
-      sign-in or new device alerts, two-factor authentication, account detail
-      changes, updates to terms of use or privacy policies.
+      Identity and access to one of the user's online accounts: account
+      creation, email verification, login or verification codes, password
+      resets, sign-in or new device alerts, two-factor authentication,
+      permissions or data shared with a third-party app, account detail
+      changes. Not: subscription status, renewals, plan, price or terms
+      changes, service activation or configuration, customer service
+      replies, newsletters about security tips.
 
   - id: newsletters
     name: "📰 Newsletters & Digests"
@@ -95,20 +112,50 @@ labels:
     color: "#007286"
     never_with: [marketing]
     description: >
-      Informational content sent regularly by subscription: newsletters,
-      digests, summaries, release notes, changelogs, announcements of new
-      features in a product the user uses, activity recaps. Not: messages
-      whose main goal is to sell.
+      Content whose purpose is to inform, with no incentive to buy:
+      newsletters, digests, summaries, release notes, changelogs,
+      announcements about a product or service the user uses, awareness and
+      prevention messages (safety tips, responsible use, a company's
+      commitments), activity recaps. Not: messages that push the user to buy,
+      subscribe or come back, discount codes, notices about the user's own
+      subscription or account.
 
   - id: marketing
     name: "📣 Marketing"
     family: type
     color: "#c2175b"
     description: >
-      A commercial message trying to make the user buy, consume or come back:
-      promotions, sales, discount codes, offers, new products, abandoned
-      carts, recommendations, referral programs, review requests, satisfaction
-      surveys.
+      A message whose purpose is to make the user buy, subscribe or come
+      back: promotions, sales, discount codes, offers, new products to buy,
+      abandoned carts, recommendations, referral programs, win-back messages,
+      requests to review a product, a service or a trip. Not: purely
+      informative messages with no incentive, surveys about a customer
+      service request, receipts or confirmations of something already bought.
+
+  - id: support
+    name: "🎧 Support"
+    family: type
+    color: "#4a86e8"   # provisoire : à choisir par Alexis
+    description: >
+      An exchange with a company's customer service about a request the user
+      made: acknowledgment of a request or ticket, a reply from an agent, a
+      follow-up question, a satisfaction survey about how the request was
+      handled. Not: security or sign-in notifications, order or payment
+      confirmations, newsletters, promotional surveys unrelated to a request.
+
+  - id: subscriptions_services
+    name: "🔁 Subscriptions & Services"
+    family: type
+    color: "#a46a21"   # provisoire : à choisir par Alexis
+    never_with: [payments]   # un rappel n'est pas une preuve de paiement
+    description: >
+      The life of a subscription or service the user uses, when no money has
+      moved yet: upcoming renewals and expiry reminders, plan, price, fee or
+      terms changes, failed payments or missing payment methods, activation,
+      configuration or cancellation of a service or option, invitations to
+      join a team workspace. Not: receipts for charges already made, sign-in
+      or security alerts, promotional offers to subscribe to something new,
+      customer service exchanges.
 
   # -------------------------------------------------------------- Domains
   - id: housing
@@ -118,7 +165,8 @@ labels:
     description: >
       The user's home: renting, rent, landlord or agency, flatsharing, service
       charges, energy, water, internet access, home insurance, repairs,
-      moving, housing benefits.
+      moving, housing benefits. Not: hotels or short stays during a trip,
+      mobile phone plans, purchases of household items.
 
   - id: administration
     name: "🏛️ Administration"
@@ -127,7 +175,8 @@ labels:
     description: >
       Formalities with public administrations and public bodies: taxes,
       identity documents, civil status, social security, benefits, vehicles,
-      fines, justice.
+      fines, justice. Not: tax-free shopping refunds for travelers, invoices
+      or terms from private companies, medical care itself.
 
   - id: health
     name: "🩺 Health"
@@ -136,7 +185,8 @@ labels:
     description: >
       The user's physical and mental health: medical appointments,
       prescriptions, test results, healthcare reimbursements, health
-      insurance, pharmacy.
+      insurance, pharmacy. Not: generic communication from a health company
+      with nothing about the user's own care, fitness or wellness promotions.
 
   - id: banking
     name: "🏦 Banking & Investments"
@@ -144,7 +194,9 @@ labels:
     color: "#b4efd3"
     description: >
       The user's money: bank accounts, cards, transfers, direct debits, bank
-      fees, savings, investments, loans, cryptocurrencies.
+      fees, savings, investments, loans, cryptocurrencies. Not: purchases,
+      trips or receipts paid by card, payments to a merchant, tax-free
+      refunds, invoices from a company that is not a bank.
 
   - id: work
     name: "💼 Work"
@@ -154,7 +206,10 @@ labels:
       The user's professional life, as an employee or self-employed: employer,
       colleagues, recruiting, job applications, employment contracts, payroll,
       work tools, clients, prospects, quotes and invoices sent by the user,
-      freelance activity and status, professional network.
+      freelance activity and status, freelance or side-project collaborations
+      even from personal email addresses, professional network. Not:
+      promotions or newsletters from professional tools and platforms, school
+      or training matters, generic job-market marketing.
 
   - id: studies
     name: "🎓 Studies & Training"
@@ -162,7 +217,9 @@ labels:
     color: "#e3d7ff"
     description: >
       Learning: school, university, the school side of a work-study program,
-      courses, exams, diplomas, online training, certifications, alumni.
+      courses, exams, diplomas, online training, certifications, alumni. Not:
+      marketing for paid or free courses the user did not enroll in,
+      professional collaborations, newsletters about a profession.
 
   - id: travels
     name: "✈️ Travels"
@@ -171,7 +228,9 @@ labels:
     description: >
       Trips outside daily life: long-distance transport, accommodation, stays,
       visas and travel formalities, tax-free shopping refunds, car rental,
-      travel insurance, activities at the destination.
+      travel insurance, activities at the destination. Not: daily commuting
+      or local mobility, travel promotions and discount codes, newsletters
+      from transport companies.
 
   - id: family_friends
     name: "👨‍👩‍👧 Family & Friends"
@@ -180,8 +239,11 @@ labels:
     protects_from: [deletable]
     description: >
       Personal exchanges with family, friends, a partner or acquaintances:
-      messages written by someone close to the user, emails forwarded by them,
-      personal invitations, group money pots between friends.
+      messages written by someone close to the user, including a sender
+      sharing the user's family name, emails forwarded by them, personal
+      invitations, group money pots between friends. Not: automated messages,
+      even when signed with a first name; colleagues or clients in a
+      professional context; customer service agents.
 
   # ------------------------------------------------------ Actions & cleanup
   - id: to_reply
@@ -193,16 +255,22 @@ labels:
       A message that expects an answer or a specific action from the user: a
       person asking a question, making a request or waiting for a
       confirmation, or an organization asking for a document or an action
-      before a deadline. Not: automatic notifications that require nothing.
+      before a deadline. Not: automatic notifications that require nothing,
+      promotional calls to action, review requests and satisfaction surveys,
+      verification codes the user requested.
 
   - id: deletable
     name: "🗑️ Deletable"
     family: cleanup
     color: "#d93025"
+    threshold: 0.55
     description: >
       A message with no value once read or once its date has passed:
       advertising, social network notifications, generic reminders, expired
-      offers, mailing list subscription confirmations, surveys.
+      offers, mailing list subscription confirmations, surveys. Not:
+      invitations addressed personally to the user (collaboration, team,
+      code repository), alerts about unusual account activity, anything the
+      user may need to act on or prove later.
 
   # --------------------------------------------------------------- System
   - id: to_review

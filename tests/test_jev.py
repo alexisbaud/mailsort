@@ -17,6 +17,7 @@ from mailsort.jev import (
     plain_name,
     stored_fingerprints,
     type_question,
+    with_user,
     yes_no_question,
 )
 
@@ -79,6 +80,20 @@ def test_stored_fingerprints_depend_on_model():
     assert set(a) == set(CONFIG.question_fingerprints())
     assert all(a[q] != b[q] for q in a)
     assert stored_fingerprints(CONFIG, "jev-1.14.0") == a
+
+
+def test_user_line_comes_first_and_changes_fingerprints():
+    state = with_user(CONFIG, {"from": "Maelly BAUD <m@example.com>", "body": ""})
+    assert list(state) == ["user", "from", "body"]
+    assert state["user"] == "Alexis Baud (the owner of this mailbox)"
+
+    anonymous = CONFIG.model_copy(
+        update={"settings": CONFIG.settings.model_copy(update={"user": None})}
+    )
+    assert "user" not in with_user(anonymous, {"from": "x"})
+    named = stored_fingerprints(CONFIG, "jev-1.14.0")
+    unnamed = stored_fingerprints(anonymous, "jev-1.14.0")
+    assert all(named[q] != unnamed[q] for q in named)
 
 
 # ======================================================================= client

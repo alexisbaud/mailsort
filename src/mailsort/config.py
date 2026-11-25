@@ -24,6 +24,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 Family = Literal["type", "domain", "action", "cleanup", "system"]
+YesNoFamily = Literal["domain", "action", "cleanup"]
 FAMILIES: tuple[str, ...] = ("type", "domain", "action", "cleanup", "system")
 YES_NO_FAMILIES = frozenset({"domain", "action", "cleanup"})
 
@@ -59,6 +60,8 @@ class _Strict(BaseModel):
 
 class TypeSettings(_Strict):
     primary_min: Probability
+    primary_pair_sum: Probability
+    """Le gagnant est aussi posé si, avec le type suivant, il atteint cette somme."""
     secondary_trigger: Probability
     secondary_min: Probability
     none_description: str = Field(min_length=1)
@@ -74,9 +77,22 @@ class Visibility(_Strict):
     message_list: Literal["show", "hide"]
 
 
+class UserSettings(_Strict):
+    full_name: str = Field(min_length=1)
+    """Nom de l'utilisateur, donné à Jev en tête de chaque mail."""
+
+    @field_validator("full_name")
+    @classmethod
+    def _normalize(cls, value: str) -> str:
+        return _normalize_text(value)
+
+
 class Settings(_Strict):
     types: TypeSettings
+    user: UserSettings | None = None
     yes_no_min: Probability
+    yes_no_min_by_family: dict[YesNoFamily, Probability] = Field(default_factory=dict)
+    """Seuil oui/non d'une famille, à la place de `yes_no_min`."""
     doubt_min: Probability
     parents: dict[Family, str]
     visibility: dict[Family, Visibility]
@@ -131,8 +147,11 @@ class Config(_Strict):
         return [lb for lb in self.labels if lb.is_yes_no and lb.enabled]
 
     def threshold_for(self, label: Label) -> float:
-        """Seuil oui/non effectif : celui du label, sinon `settings.yes_no_min`."""
-        return label.threshold if label.threshold is not None else self.settings.yes_no_min
+        """Seuil oui/non effectif : celui du label, sinon celui de sa famille
+        (`yes_no_min_by_family`), sinon `yes_no_min`."""
+        if label.threshold is not None:
+            return label.threshold
+        return self.settings.yes_no_min_by_family.get(label.family, self.settings.yes_no_min)
 
     def full_name(self, label: Label) -> str:
         """Nom complet du label dans Gmail, par exemple « Types/💳 Payments »."""
@@ -164,10 +183,12 @@ class Config(_Strict):
             {
                 "types": [
                     settings.types.primary_min,
+                    settings.types.primary_pair_sum,
                     settings.types.secondary_trigger,
                     settings.types.secondary_min,
                 ],
                 "yes_no_min": settings.yes_no_min,
+                "yes_no_min_by_family": dict(sorted(settings.yes_no_min_by_family.items())),
                 "doubt_min": settings.doubt_min,
                 "labels": [
                     [
@@ -194,6 +215,17 @@ class Config(_Strict):
             errors.append(
                 f"settings : doubt_min ({settings.doubt_min}) doit être inférieur "
                 f"à yes_no_min ({settings.yes_no_min})"
+            )
+        for family, value in settings.yes_no_min_by_family.items():
+            if value <= settings.doubt_min:
+                errors.append(
+                    f"settings.yes_no_min_by_family.{family} ({value}) doit être supérieur "
+                    f"à doubt_min ({settings.doubt_min})"
+                )
+        if settings.types.primary_pair_sum < settings.types.primary_min:
+            errors.append(
+                f"settings.types : primary_pair_sum ({settings.types.primary_pair_sum}) doit être "
+                f"au moins égal à primary_min ({settings.types.primary_min})"
             )
 
         used_families = {lb.family for lb in self.labels}
