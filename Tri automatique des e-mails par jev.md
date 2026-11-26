@@ -102,7 +102,7 @@ Jev donne une probabilité entre 0 et 1 pour chaque label ; le code décide ensu
    - 🔁 Subscriptions & Services et 💳 Payments : un rappel d'échéance n'est pas une preuve de paiement.
 4. **Autres labels.** Chaque question oui/non a un seuil : 0,70 pour les domaines (`yes_no_min_by_family`), 0,55 pour 🗑️ Deletable (seuil propre au label), 0,80 pour ✉️ To Reply (`yes_no_min`, par défaut). Le label est posé si sa probabilité atteint son seuil.
 5. **Protections.** 🗑️ Deletable n'est jamais posé si le mail a aussi 💳 Payments, 📄 Official Documents, 🎟️ Tickets & Bookings, 👨‍👩‍👧 Family & Friends ou ✉️ To Reply.
-6. **Déjà répondu.** ✉️ To Reply est retiré dès que le dernier message du fil vient d'Alexis. Le programme le vérifie à chaque passage, sans appeler Jev.
+6. **Déjà répondu.** ✉️ To Reply est retiré dès que le dernier message du fil vient d'Alexis. Le programme le vérifie à chaque passage, sans appeler Jev : une seule liste des messages envoyés par Alexis lui dit dans quels fils il a écrit, et seuls ces fils sont lus (lire un fil coûte cher en quota Gmail).
 7. **Zone de doute.** Un type incertain (ni 0,60, ni deux types à 0,80) ou une question oui/non entre 0,50 et son seuil est un doute : le label n'est pas posé. Le doute est enregistré dans la base, écrit dans le journal et affiché par `mailsort explain`, mais il n'envoie pas en 🤔 To Review.
 8. **Mail sans repère.** 🤔 To Review est posé uniquement si le mail ne reçoit ni type, ni domaine, ni 🗑️ Deletable.
 

@@ -163,6 +163,7 @@ class Classifier:
         self.fingerprints = stored_fingerprints(config, client.model)
         self.user_addresses = [box.profile_email(), *user_addresses]
         self._threads: dict[str, ThreadInfo] = {}
+        self._sent_threads: set[str] | None = None
 
     def list_messages(self, query: str | None, limit: int | None) -> list[tuple[str, str]]:
         return list(self.box.list_messages(query, limit))
@@ -181,9 +182,23 @@ class Classifier:
             if question not in answers or answers[question].fingerprint != fingerprint
         ]
 
+    def _user_wrote_in(self, thread_id: str) -> bool:
+        """L'utilisateur a envoyé au moins un message dans ce fil.
+
+        Une seule liste de ses messages envoyés (quelques unités de quota) remplace la lecture
+        de chaque fil (10 unités chacune) : seuls les fils où il a écrit doivent être lus pour
+        savoir si son message est le dernier (règle 6).
+        """
+        if self._sent_threads is None:
+            self._sent_threads = {thread for _, thread in self.box.list_messages("in:sent")}
+        return thread_id in self._sent_threads
+
     def _thread(self, thread_id: str) -> ThreadInfo:
         if thread_id not in self._threads:
-            self._threads[thread_id] = self.box.thread_info(thread_id)
+            if self._user_wrote_in(thread_id):
+                self._threads[thread_id] = self.box.thread_info(thread_id)
+            else:
+                self._threads[thread_id] = ThreadInfo(user_replied=False, last_from_user=False)
         return self._threads[thread_id]
 
     def _state(self, message: GmailMessage, thread: ThreadInfo) -> dict[str, Any]:

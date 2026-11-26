@@ -126,6 +126,15 @@ class _Messages:
 
     def list(self, **kwargs: Any) -> Request:
         self.service.calls.append(("messages.list", kwargs))
+        if kwargs.get("q") == "in:sent":
+            # Messages envoyés par l'utilisateur, tirés des fils (comme la recherche Gmail).
+            sent = [
+                {"id": f"{thread_id}-sent{i}", "threadId": thread_id}
+                for thread_id, thread in self.service.threads_by_id.items()
+                for i, message in enumerate(thread.get("messages") or [])
+                if "SENT" in (message.get("labelIds") or [])
+            ]
+            return self.service.request("messages.list", {"messages": sent})
         ids = list(self.service.messages_by_id)
         if kwargs.get("labelIds"):
             wanted = set(kwargs["labelIds"])

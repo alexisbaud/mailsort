@@ -244,13 +244,21 @@ def test_reply_removes_to_reply(db):
     assert fake.requests == []
 
 
-def test_thread_is_read_only_when_to_reply_is_at_stake(db):
+def test_thread_is_read_only_when_to_reply_is_at_stake_and_user_wrote_in_it(db):
     service = mailbox()
     sort(service, db)
     service.calls.clear()
     sort(service, db)
-    threads = [kwargs["id"] for name, kwargs in service.calls if name == "threads.get"]
-    assert threads == ["t3"]
+    # ✉️ To Reply est en jeu sur « Dîner », mais Alexis n'a rien écrit dans ce fil : une seule
+    # liste de ses messages envoyés suffit, aucun fil n'est lu.
+    assert [k["id"] for n, k in service.calls if n == "threads.get"] == []
+    assert sum(1 for n, k in service.calls if n == "messages.list" and k.get("q") == "in:sent") == 1
+
+    service.threads_by_id["t3"] = thread("INBOX", "SENT")
+    service.threads_by_id["t1"] = thread("INBOX", "SENT")  # écrit dans le fil, mais pas en jeu
+    service.calls.clear()
+    sort(service, db)
+    assert [k["id"] for n, k in service.calls if n == "threads.get"] == ["t3"]
 
 
 # ===================================================================== labels
