@@ -1,0 +1,41 @@
+# Pile de mailsort sur le VPS : une tâche lancée 3 fois par jour par le timer systemd
+# (mailsort.timer, dans vps-platform), pas un site. Ni Caddy, ni domaine, ni port ouvert :
+# le conteneur a seulement besoin de joindre Gmail et Jev sur internet.
+#
+#   /srv/mailsort/compose.yml   ← ce fichier
+#   /srv/mailsort/.env          ← secrets (modèle : deploy/.env.example), jamais dans Git
+#   /srv/mailsort/.release      ← IMAGE_TAG=sha-xxxxxxx, écrit par vps-deploy
+#   /srv/mailsort/data/         ← token.json, mailsort.db, logs/ (propriétaire : 10001)
+#
+# Lancer un passage à la main, sur le VPS :
+#   site mailsort run --rm mailsort run              # vrai passage
+#   site mailsort run --rm mailsort run --dry-run    # passage à blanc
+name: ${SITE:?SITE manquant dans .env}
+
+services:
+  mailsort:
+    image: ghcr.io/alexisbaud/mailsort:${IMAGE_TAG:?IMAGE_TAG manquant dans .release}
+    # Profil : `docker compose up` ne lance jamais de passage par erreur. Seuls
+    # `docker compose run` (le timer, ou toi à la main) le font.
+    profiles: [task]
+    env_file: .env
+    environment:
+      # Chemins fixés ici : ils l'emportent sur une valeur copiée par erreur dans .env.
+      MAILSORT_DB: /data/mailsort.db
+      MAILSORT_LOG_DIR: /data/logs
+      GOOGLE_TOKEN_FILE: /data/token.json
+      GOOGLE_CLIENT_SECRET_FILE: /data/credentials.json
+      MAILSORT_LABELS: /app/labels.yaml
+    volumes:
+      - ./data:/data
+    # Un petit processus d'init transmet proprement l'arrêt (SIGTERM) au programme.
+    init: true
+    stop_grace_period: 30s
+    # Conteneur verrouillé : système de fichiers en lecture seule (sauf /data et /tmp),
+    # aucun droit spécial, mémoire et nombre de processus plafonnés.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 256m
+    pids_limit: 64

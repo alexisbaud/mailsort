@@ -13,7 +13,7 @@ Tout le tri passe par Jev : les filtres Gmail actuels seront supprimés une fois
 | Moteur de tri | Jev, en mode hybride : un choix unique pour les types, une question oui/non pour chaque autre label |
 | Langage | Python |
 | Développement | Avec Claude Code, testé en local avant le déploiement sur le VPS |
-| Hébergement | Le VPS d'Alexis, 3 passages par jour |
+| Hébergement | Le VPS d'Alexis, 3 passages par jour : une image Docker construite par GitHub, lancée par un timer systemd (voir Déploiement sur le VPS) |
 | Périmètre | Toute la boîte, historique compris |
 | Changement de label | Retri de tous les mails |
 | Création des labels Gmail | Faite par le programme, pas à la main |
@@ -32,7 +32,7 @@ Tout le tri passe par Jev : les filtres Gmail actuels seront supprimés une fois
 
 ## Fonctionnement
 
-Un cron lance le programme à 8h30, 12h30 et 18h (heure de Paris). Un verrou (fichier `mailsort.db.lock`, libéré même si le programme s'arrête brutalement) empêche deux passages de tourner en même temps : le second s'arrête aussitôt sans rien toucher.
+Un timer systemd du VPS lance le programme à 8h30, 12h30 et 18h (heure de Paris), et rattrape au redémarrage du serveur un passage manqué pendant qu'il était éteint. Un verrou (fichier `mailsort.db.lock`, libéré même si le programme s'arrête brutalement) empêche deux passages de tourner en même temps : le second s'arrête aussitôt sans rien toucher.
 
 1. **Synchroniser les labels.** Le programme lit `labels.yaml`, crée les labels Gmail manquants, y compris les labels parents, et renomme ceux qui ont changé de nom. Il garde le lien entre chaque label du fichier et l'identifiant du label Gmail, donc un renommage conserve les mails déjà classés.
 2. **Repérer les changements de config.** Deux sortes d'empreintes sont comparées à celles du dernier passage :
@@ -281,7 +281,7 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 2. **Mesure de qualité.** `mailsort eval` compare le résultat aux labels « 💳 Paiements » et « 📦 Réceptions », classés à la main et par filtres, ou à toute autre paire passée par `--compare "Nom du label Gmail=id"`. Il classe les mails de référence (réponses reprises si elles existent), puis affiche l'accord, le rappel, la précision et les mails où Jev n'est pas d'accord, pour ajuster descriptions et seuils. Rien n'est modifié dans Gmail. Au 25 novembre 2026, ces deux labels n'existent plus dans la boîte : il n'y a rien à comparer, et les corrections manuelles (`mailsort corrections`) prennent le relais.
 3. **Reprise des labels existants.** Un label Gmail qui porte déjà le nom complet d'un label du fichier (par exemple « Types/💳 Payments ») est repris au lieu d'être recréé. Les anciens labels « 💳 Paiements » et « 📦 Réceptions » n'existant plus, il n'y a rien d'autre à reprendre.
 4. **Premier passage réel.** D'abord sur un petit lot (`mailsort run -q "newer_than:7d"`), puis sur toute la boîte (`mailsort run --csv`) : le bilan donne les labels ajoutés et retirés, le CSV le détail par mail.
-5. **Bascule.** Alexis supprime les 3 filtres Gmail (Settings → See all settings → Filters and Blocked Addresses), puis le cron est activé.
+5. **Bascule.** Alexis supprime les 3 filtres Gmail (Settings → See all settings → Filters and Blocked Addresses), puis le timer est activé.
 
 | Commande | Effet |
 | --- | --- |
@@ -297,6 +297,17 @@ Le programme passe d'abord par un mode test qui ne touche pas Gmail, puis rempla
 | `mailsort corrections [--show N]` | Liste les corrections manuelles par label, avec la probabilité de Jev |
 | `mailsort labels check` | Valide `labels.yaml` sans rien toucher |
 | `mailsort labels delete <id> --confirm` | Supprime de Gmail un label retiré du fichier (les mails restent) |
+
+## Déploiement sur le VPS
+
+Le programme suit les règles de la plateforme du VPS (dépôt `vps-platform`) : une image Docker construite par GitHub et rangée dans GHCR, un dossier par site sous `/srv/`, des secrets qui ne quittent pas le serveur. Ce n'est pas un site : ni Caddy, ni domaine, ni port ouvert.
+
+- **Image** (`Dockerfile`) : Python 3.12, dépendances figées par `uv.lock`, `labels.yaml` compris, compte sans droits (uid 10001), heure de Paris. Le `.dockerignore` est une liste blanche : seuls le code, `labels.yaml` et les fichiers du projet Python y entrent, jamais `.env`, `token.json`, `credentials.json`, la base, le journal ni les CSV.
+- **Pile** (`deploy/compose.yml`, copié en `/srv/mailsort/compose.yml`) : un service `mailsort` sous un profil, pour que `docker compose up` ne lance jamais de passage par erreur. Système de fichiers en lecture seule, aucun droit spécial, 256 Mo de mémoire au plus.
+- **Données** (`/srv/mailsort/data/`, monté sur `/data`) : `token.json` (copié du Mac, renouvelé par le programme), `mailsort.db`, `logs/`. C'est le seul dossier où le programme écrit.
+- **Secrets** (`/srv/mailsort/.env`, modèle `deploy/.env.example`) : clé Jev dédiée au VPS, version de Jev, adresses de l'utilisateur, budget Gmail. `credentials.json` reste sur le Mac : il ne sert qu'à créer le jeton.
+- **Lancement** : le timer systemd lance `docker compose run --rm mailsort run`. Un passage à la main sur le VPS : `site mailsort run --rm mailsort run`.
+- **Une seule base** : une fois le VPS en service, le Mac ne lance plus de vrai passage (passage à blanc et `explain` restent possibles), sinon les deux bases divergent.
 
 ## Questions ouvertes
 

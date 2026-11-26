@@ -1,0 +1,10 @@
+# Liste blanche : l'image ne reçoit que ce qui est nommé ici. Tout le reste (.env, token.json,
+# credentials.json, mailsort.db, logs, CSV, .git, .venv…) ne peut pas y entrer par erreur.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!labels.yaml
+!src/
+src/**/__pycache__
+src/**/*.pyc

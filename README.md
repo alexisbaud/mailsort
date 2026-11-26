@@ -106,3 +106,15 @@ d'affilée, et immédiatement (code 1) si l'accès Gmail ou Jev est refusé.
 | `mailsort eval [--compare "Label Gmail=id"]` | Compare le classement à un label Gmail existant, sans rien modifier |
 | `mailsort corrections` | Liste tes corrections par label, avec la probabilité donnée par Jev |
 | `mailsort labels delete <id> --confirm` | Supprime de Gmail un label retiré de `labels.yaml` |
+
+## Image Docker (pour le VPS)
+
+```bash
+docker build -t mailsort .                     # construit l'image (aucun secret dedans)
+docker run --rm mailsort labels check          # vérifie labels.yaml dans l'image
+```
+
+Sur le VPS, l'image est lancée par `deploy/compose.yml` (copié dans `/srv/mailsort/`), avec les
+secrets dans `/srv/mailsort/.env` (modèle `deploy/.env.example`) et les données dans
+`/srv/mailsort/data/` (`token.json`, `mailsort.db`, `logs/`). Détail dans la spec, section
+« Déploiement sur le VPS ».
