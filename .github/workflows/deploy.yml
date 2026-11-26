@@ -1,0 +1,104 @@
+name: Deploy
+
+# Quand le programme change sur main : lance les tests, construit l'image Docker pour le VPS
+# (x86, linux/amd64), la publie sur le registre GitHub (GHCR) avec le tag sha-xxxxxxx,
+# puis demande au VPS de la déployer.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'labels.yaml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        run: pipx install uv==0.12.10
+
+      - name: Lint and tests
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute image tag
+        id: vars
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/alexisbaud/mailsort:${{ steps.vars.outputs.tag }}
+          labels: org.opencontainers.image.source=https://github.com/alexisbaud/mailsort
+          cache-from: type=gha,scope=mailsort
+          cache-to: type=gha,mode=max,scope=mailsort
+
+  # Ne s'exécute que lorsque la variable VPS_HOST existe dans le dépôt, c'est-à-dire une fois
+  # le VPS prêt à recevoir mailsort (phase 6 du plan de déploiement).
+  deploy:
+    needs: build
+    if: vars.VPS_HOST != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_DEPLOY_KEY_MAILSORT }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # La clé est liée, côté VPS, à une commande forcée : elle ne peut QUE déployer
+      # mailsort. La seule chose transmise est le tag de l'image.
+      - name: Deploy
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          VPS_HOST: ${{ vars.VPS_HOST }}
+        run: ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "deploy@$VPS_HOST" "$TAG"
